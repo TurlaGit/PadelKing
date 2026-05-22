@@ -1,0 +1,31 @@
+services:
+  # Polling-бот. Если хочется free-тариф Render — поменяйте `type: worker` на `type: web`:
+  # тогда main.py поднимет http-сервер на $PORT (для healthcheck Render) рядом с polling.
+  - type: worker
+    name: padelking-bot
+    runtime: python
+    plan: starter
+    region: frankfurt
+    branch: main
+    buildCommand: pip install -r requirements.txt
+    startCommand: python main.py
+    autoDeploy: true
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: BOT_USERNAME
+        value: PadelFirst_bot
+      - key: ADMIN_CHAT_ID
+        value: "212659753"
+      - key: GROUP_CHAT_ID
+        sync: false
+      - key: GOOGLE_SHEET_ID
+        sync: false
+      - key: GOOGLE_CREDENTIALS_JSON
+        sync: false
+      - key: DB_PATH
+        value: /var/data/padel.db
+    disk:
+      name: padel-data
+      mountPath: /var/data
+      sizeGB: 1
