@@ -31,8 +31,7 @@ texts:
   admin_contact: |
     ❓ <b>Связь с админом</b>
 
-    По любым вопросам пиши <a href="https://t.me/padelking_admin">@padelking_admin</a>
-    или просто ответь сообщением — он увидит.
+    По любым вопросам пиши <a href="https://t.me/zhurakovskaya">@zhurakovskaya</a>
 
   already_registered: |
     Ты уже записан на этот турнир ✅
@@ -53,15 +52,29 @@ texts:
     🎉 Освободилось место — ты переведён из листа ожидания
     в основной состав турнира <b>{title}</b>!
 
+  # Поддерживаются плейсхолдеры: {title}, {date}, {weekday}, {time}, {price}, {location}
+  # Если плейсхолдер не нужен — просто не используй его.
   payment: |
-    💳 <b>Реквизиты для оплаты</b>
+    Привет!
+    Ты участвуешь в {weekday} {date} в <b>{title}</b>.
 
-    Сбербанк: <code>1234 5678 9012 3456</code>
-    Получатель: Иван И.
-    СБП по номеру: <code>+7 900 123-45-67</code> (Сбер)
+    💰 Взнос: <b>{price}</b>.
 
-    После оплаты пришли скрин админу @padelking_admin —
-    он подтвердит запись. Спасибо!
+    <b>Оплата возможна:</b>
+
+    Переводом на карту:
+    🏦 Bank OCBC
+    💳 <code>167810154259</code>
+    👤 Prasetyo Utomo
+
+    Криптой (TRC20):
+    <code>TBjsvGyMb37AmDSsZVkJQf15GjMKRScPDG</code>
+
+    После оплаты просьба отправить чек ответным сообщением админу <a href="https://t.me/zhurakovskaya">@zhurakovskaya</a>.
+
+    ‼️ Просьба произвести оплату до начала турнира. ‼️
+
+    Благодарю!
 
   announce_button: "✅ Записаться"
 

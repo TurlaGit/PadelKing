@@ -9,7 +9,7 @@ import db
 from announcement import update_announcement
 from config import ADMIN_CHAT_ID
 from content import load_content
-from formatting import esc, format_tournament
+from formatting import esc, format_tournament, render_payment
 from keyboards import back_to_menu, main_menu, tournament_card, tournaments_list
 from sheets import append_registration
 
@@ -141,7 +141,7 @@ async def cb_join(cb: CallbackQuery, bot: Bot):
     base = texts["joined"] if status == "active" else texts["waitlist"]
 
     # DM пользователю с реквизитами
-    payment = texts.get("payment", "").strip()
+    payment = render_payment(texts.get("payment", "").strip(), t)
     dm_text = base + (f"\n\n{payment}" if payment else "")
     try:
         await bot.send_message(user.id, dm_text)
@@ -205,7 +205,7 @@ async def cb_cancel(cb: CallbackQuery, bot: Bot):
     if promoted:
         try:
             note = texts["promoted"].format(title=t["title"])
-            payment = texts.get("payment", "").strip()
+            payment = render_payment(texts.get("payment", "").strip(), t)
             text = note + (f"\n\n{payment}" if payment else "")
             await bot.send_message(promoted["user_id"], text)
         except Exception as e:
