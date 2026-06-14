@@ -28,6 +28,8 @@ texts:
   my_regs_header: |
     📋 <b>Твои записи</b>
 
+  admin_username: "@zhurakovskaya"
+
   admin_contact: |
     ❓ <b>Связь с админом</b>
 

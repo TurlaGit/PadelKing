@@ -88,6 +88,17 @@ def pending_payments_choose(pendings: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def payment_review(payment_id: int) -> InlineKeyboardMarkup:
+    """Кнопки Яне для проверки скрина оплаты."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ Принять за себя", callback_data=f"pchk:{payment_id}:self")],
+            [InlineKeyboardButton(text="👥 Принять за двоих", callback_data=f"pchk:{payment_id}:both")],
+            [InlineKeyboardButton(text="❌ Отклонить", callback_data=f"pchk:{payment_id}:reject")],
+        ]
+    )
+
+
 def pay_choice(rid: int, pays_for: str = "self") -> InlineKeyboardMarkup:
     """Выбор «за себя / за обоих». Текущий выбор помечается галочкой."""
     self_mark = "✅ " if pays_for == "self" else ""

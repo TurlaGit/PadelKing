@@ -803,6 +803,76 @@ async def set_payment_screenshot(rid: int, user_id: int, file_id: str) -> None:
         await conn.commit()
 
 
+async def get_payment(payment_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("SELECT * FROM payments WHERE id=?", (payment_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def approve_payment(payment_id: int, mode: str, admin_id: int) -> dict | None:
+    """Подтверждает оплату. mode='self' — только плательщик; mode='both' —
+    закрывает и партнёрскую строку. Возвращает данные для уведомлений."""
+    status = "paid"
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await conn.execute("SELECT * FROM payments WHERE id=?", (payment_id,))
+            pay = await cur.fetchone()
+            if not pay:
+                await conn.rollback()
+                return None
+            now = _now()
+            await conn.execute(
+                "UPDATE payments SET status=?, pays_for=?, reviewed_by=?, "
+                "reviewed_at=?, updated_at=? WHERE id=?",
+                (status, mode, admin_id, now, now, payment_id),
+            )
+            notified = [pay["user_id"]]
+            if mode == "both":
+                cur = await conn.execute(
+                    "SELECT * FROM payments WHERE registration_id=? AND id<>?",
+                    (pay["registration_id"], payment_id),
+                )
+                other = await cur.fetchone()
+                if other:
+                    await conn.execute(
+                        "UPDATE payments SET status=?, reviewed_by=?, reviewed_at=?, "
+                        "updated_at=? WHERE id=?",
+                        (status, admin_id, now, now, other["id"]),
+                    )
+                    if other["user_id"]:
+                        notified.append(other["user_id"])
+            await conn.commit()
+            return {
+                "registration_id": pay["registration_id"],
+                "mode": mode,
+                "notified_user_ids": notified,
+            }
+        except Exception:
+            await conn.rollback()
+            raise
+
+
+async def reject_payment(payment_id: int, admin_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("SELECT * FROM payments WHERE id=?", (payment_id,))
+        pay = await cur.fetchone()
+        if not pay:
+            return None
+        now = _now()
+        await conn.execute(
+            "UPDATE payments SET status='rejected', reviewed_by=?, reviewed_at=?, "
+            "updated_at=? WHERE id=?",
+            (admin_id, now, now, payment_id),
+        )
+        await conn.commit()
+        return {"registration_id": pay["registration_id"], "user_id": pay["user_id"]}
+
+
 async def get_main_registrations(tid: str) -> list[dict]:
     """Пары основного состава (не в листе ожидания)."""
     placeholders = ",".join("?" * len(SLOT_STATUSES))
