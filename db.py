@@ -1393,6 +1393,7 @@ async def get_unpaid_payment_candidates() -> list[dict]:
             JOIN registrations r ON r.id = p.registration_id
             JOIN tournaments t ON t.id = r.tournament_id
             WHERE p.status IN ('unpaid','rejected') AND r.status='active'
+              AND r.is_waitlist=0
               AND t.is_active=1 AND t.status_v2='published'
             """
         )
@@ -1410,7 +1411,8 @@ async def set_payment_reminder_stage(payment_id: int, stage: int, now_iso: str) 
 
 async def get_active_payment_state(tid: str | None = None) -> list[dict]:
     """Активные пары с агрегатом оплат (для авто-снятия и списка неоплативших)."""
-    where = "r.status='active' AND t.is_active=1 AND t.status_v2='published'"
+    where = ("r.status='active' AND r.is_waitlist=0 "
+             "AND t.is_active=1 AND t.status_v2='published'")
     params: tuple = ()
     if tid:
         where += " AND r.tournament_id=?"

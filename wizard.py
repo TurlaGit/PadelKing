@@ -29,6 +29,10 @@ from timeutils import make_start_at, payment_deadline, to_iso
 log = logging.getLogger(__name__)
 router = Router()
 
+# Defense-in-depth: весь визард доступен только администраторам.
+router.message.filter(F.from_user.id.in_(ADMIN_IDS))
+router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
+
 _CURRENCIES = ["IDR", "USD", "RUB"]
 
 
