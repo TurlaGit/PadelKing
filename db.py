@@ -1042,6 +1042,77 @@ async def cancel_my_registration(tid: str, user_id: int) -> dict | None:
             raise
 
 
+async def cancel_registration_by_id(rid: int) -> dict | None:
+    """Админ снимает пару по id. Освобождает слот, поднимает из листа
+    ожидания. Возвращает {tid, member_ids, promoted} или None."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await conn.execute("SELECT * FROM registrations WHERE id=?", (rid,))
+            reg = await cur.fetchone()
+            if not reg or reg["status"] not in ACTIVE_REG_STATUSES:
+                await conn.rollback()
+                return None
+            was_waitlist = bool(reg["is_waitlist"])
+            members = [reg["player_user_id"], reg["partner_user_id"]]
+            await conn.execute(
+                "UPDATE registrations SET status='cancelled', updated_at=? WHERE id=?",
+                (_now(), rid),
+            )
+            promoted = None
+            if not was_waitlist:
+                promoted = await _promote_one_from_waitlist(conn, reg["tournament_id"])
+            await conn.commit()
+            return {
+                "tid": reg["tournament_id"],
+                "member_ids": [m for m in members if m],
+                "promoted": promoted,
+                "pair_name": (reg["player_name"] or "—", reg["partner_name"] or "—"),
+            }
+        except Exception:
+            await conn.rollback()
+            raise
+
+
+async def cancel_tournament(tid: str) -> dict | None:
+    """Отменяет турнир: помечает cancelled/неактивным, снимает все живые
+    записи. Возвращает {title, member_ids, announce_chat_id, announce_message_id}."""
+    placeholders = ",".join("?" * len(ACTIVE_REG_STATUSES))
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("SELECT * FROM tournaments WHERE id=?", (tid,))
+        t = await cur.fetchone()
+        if not t:
+            return None
+        cur = await conn.execute(
+            f"SELECT player_user_id, partner_user_id FROM registrations "
+            f"WHERE tournament_id=? AND status IN ({placeholders})",
+            (tid, *ACTIVE_REG_STATUSES),
+        )
+        members: set[int] = set()
+        for row in await cur.fetchall():
+            for m in (row["player_user_id"], row["partner_user_id"]):
+                if m:
+                    members.add(m)
+        await conn.execute(
+            f"UPDATE registrations SET status='cancelled', updated_at=? "
+            f"WHERE tournament_id=? AND status IN ({placeholders})",
+            (_now(), tid, *ACTIVE_REG_STATUSES),
+        )
+        await conn.execute(
+            "UPDATE tournaments SET is_active=0, status_v2='cancelled' WHERE id=?",
+            (tid,),
+        )
+        await conn.commit()
+        return {
+            "title": t["title"],
+            "member_ids": list(members),
+            "announce_chat_id": t["announce_chat_id"],
+            "announce_message_id": t["announce_message_id"],
+        }
+
+
 async def decline_pair_request(req_id: int) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row

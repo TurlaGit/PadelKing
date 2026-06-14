@@ -93,8 +93,28 @@ async def cmd_admin(message: Message):
         [InlineKeyboardButton(text="💳 Оплаты", callback_data="adm:payments")],
         [InlineKeyboardButton(text="➕ Добавить пару вручную", callback_data="adm:addpair")],
         [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm:analytics")],
+        [InlineKeyboardButton(text="🗑 Отменить турнир", callback_data="adm:canceltour")],
     ])
     await message.answer("⚙️ <b>Админка PadelKing</b>", reply_markup=kb)
+
+
+def _admin_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать турнир", callback_data="tw:start")],
+        [InlineKeyboardButton(text="💳 Оплаты", callback_data="adm:payments")],
+        [InlineKeyboardButton(text="➕ Добавить пару вручную", callback_data="adm:addpair")],
+        [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm:analytics")],
+        [InlineKeyboardButton(text="🗑 Отменить турнир", callback_data="adm:canceltour")],
+    ])
+
+
+@router.callback_query(F.data == "adm:menu")
+async def adm_menu(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    await _safe_edit(cb.message, "⚙️ <b>Админка PadelKing</b>", _admin_menu_kb())
+    await cb.answer()
 
 
 def _fmt_money(amount, currency: str) -> str:
@@ -239,6 +259,7 @@ async def manage_pair(cb: CallbackQuery):
         [InlineKeyboardButton(text="✅ Подтвердить обоих", callback_data=f"amc:{rid}:both")],
         [InlineKeyboardButton(text=f"✅ Только {a}"[:60], callback_data=f"amc:{rid}:player")],
         [InlineKeyboardButton(text=f"✅ Только {b}"[:60], callback_data=f"amc:{rid}:partner")],
+        [InlineKeyboardButton(text="❌ Снять пару", callback_data=f"apdel:{rid}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"apay:{reg['tournament_id']}")],
     ])
     await _safe_edit(cb.message, f"Пара: <b>{esc(a)} + {esc(b)}</b>\nОтметить оплату вручную:", kb)
@@ -266,6 +287,139 @@ async def manual_confirm(cb: CallbackQuery, bot: Bot):
     text, kb = await _roster(reg["tournament_id"])
     await _safe_edit(cb.message, text, kb)
     await cb.answer("Отмечено ✅")
+
+
+# ---------- снятие пары админом ----------
+
+@router.callback_query(F.data.startswith("apdel:"))
+async def del_pair_confirm(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    rid = int(cb.data.split(":", 1)[1])
+    reg = await db.get_registration(rid)
+    if not reg:
+        await cb.answer("Не найдено.", show_alert=True)
+        return
+    a = esc(reg.get("player_name") or "—")
+    b = esc(reg.get("partner_name") or "—")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, снять", callback_data=f"apdel2:{rid}")],
+        [InlineKeyboardButton(text="⬅️ Нет", callback_data=f"apm:{rid}")],
+    ])
+    await _safe_edit(cb.message, f"Снять пару <b>{a} + {b}</b> с турнира?", kb)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("apdel2:"))
+async def del_pair_do(cb: CallbackQuery, bot: Bot):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    rid = int(cb.data.split(":", 1)[1])
+    res = await db.cancel_registration_by_id(rid)
+    if not res:
+        await cb.answer("Пара уже снята.", show_alert=True)
+        return
+    t = await db.get_tournament(res["tid"])
+    title = esc(t["title"]) if t else "турнир"
+    for uid in res["member_ids"]:
+        try:
+            await bot.send_message(
+                uid, f"❌ Организатор снял вашу запись на турнир «{title}»."
+            )
+        except Exception:
+            pass
+    if res["promoted"]:
+        await _notify_promoted(bot, res["promoted"], title)
+    await refresh_announcement(bot, res["tid"])
+    text, kb = await _roster(res["tid"])
+    await _safe_edit(cb.message, text, kb)
+    await cb.answer("Пара снята")
+
+
+async def _notify_promoted(bot: Bot, promoted: dict, title: str) -> None:
+    text = (f"🎉 Освободилось место — вас подняли из листа ожидания на «{title}»!\n"
+            "Скоро пришлём реквизиты на оплату.")
+    for uid in (promoted.get("player_user_id"), promoted.get("partner_user_id")):
+        if uid:
+            try:
+                await bot.send_message(uid, text)
+            except Exception:
+                pass
+
+
+# ---------- отмена турнира админом ----------
+
+@router.callback_query(F.data == "adm:canceltour")
+async def cancel_tour_list(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    ts = await db.list_active_tournaments()
+    if not ts:
+        await cb.message.answer("Активных турниров нет.")
+        await cb.answer()
+        return
+    await cb.message.answer("🗑 Отменить турнир — выбери:", reply_markup=_tournaments_kb(ts, "actour"))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("actour:"))
+async def cancel_tour_confirm(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    tid = cb.data.split(":", 1)[1]
+    t = await db.get_tournament(tid)
+    if not t:
+        await cb.answer("Не найдено.", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Да, отменить турнир", callback_data=f"actour2:{tid}")],
+        [InlineKeyboardButton(text="⬅️ Нет", callback_data="adm:menu")],
+    ])
+    await _safe_edit(
+        cb.message,
+        f"Отменить турнир <b>{esc(t['title'])}</b>?\n"
+        "Все записи будут сняты, участники получат уведомление.",
+        kb,
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("actour2:"))
+async def cancel_tour_do(cb: CallbackQuery, bot: Bot):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    tid = cb.data.split(":", 1)[1]
+    res = await db.cancel_tournament(tid)
+    if not res:
+        await cb.answer("Турнир не найден.", show_alert=True)
+        return
+    title = esc(res["title"])
+    # открепляем и помечаем анонс отменённым
+    if res["announce_chat_id"] and res["announce_message_id"]:
+        try:
+            await bot.unpin_chat_message(res["announce_chat_id"], res["announce_message_id"])
+        except Exception:
+            pass
+        try:
+            await bot.edit_message_text(
+                f"🚫 <b>{title}</b>\n\nТурнир отменён.",
+                chat_id=res["announce_chat_id"],
+                message_id=res["announce_message_id"],
+            )
+        except Exception:
+            pass
+    for uid in res["member_ids"]:
+        try:
+            await bot.send_message(uid, f"🚫 Турнир «{title}» отменён организатором.")
+        except Exception:
+            pass
+    await _safe_edit(cb.message, f"🚫 Турнир «{title}» отменён. Участников уведомили: {len(res['member_ids'])}.", None)
+    await cb.answer("Турнир отменён")
 
 
 # ---------- /addpair ----------
