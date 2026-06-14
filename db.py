@@ -768,6 +768,41 @@ async def set_payment_pays_for(rid: int, user_id: int, pays_for: str) -> None:
         await conn.commit()
 
 
+# Статусы оплаты, в которых ещё ждём действия игрока/проверки.
+PENDING_PAYMENT_STATUSES = ("unpaid", "rejected", "pending_review")
+
+
+async def get_user_pending_payments(user_id: int) -> list[dict]:
+    """Платёжные строки игрока, ожидающие оплаты/проверки, в активных турнирах."""
+    pp = ",".join("?" * len(PENDING_PAYMENT_STATUSES))
+    rs = ",".join("?" * len(ACTIVE_REG_STATUSES))
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            f"""
+            SELECT p.*, r.tournament_id, t.title
+            FROM payments p
+            JOIN registrations r ON r.id = p.registration_id
+            JOIN tournaments t ON t.id = r.tournament_id
+            WHERE p.user_id=? AND p.status IN ({pp})
+              AND r.status IN ({rs}) AND t.is_active=1
+            ORDER BY COALESCE(t.start_at, t.date, ''), t.time
+            """,
+            (user_id, *PENDING_PAYMENT_STATUSES, *ACTIVE_REG_STATUSES),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def set_payment_screenshot(rid: int, user_id: int, file_id: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE payments SET status='pending_review', screenshot_file_id=?, "
+            "updated_at=? WHERE registration_id=? AND user_id=?",
+            (file_id, _now(), rid, user_id),
+        )
+        await conn.commit()
+
+
 async def get_main_registrations(tid: str) -> list[dict]:
     """Пары основного состава (не в листе ожидания)."""
     placeholders = ",".join("?" * len(SLOT_STATUSES))

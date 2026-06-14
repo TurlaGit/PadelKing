@@ -77,6 +77,17 @@ def reg_cancel() -> InlineKeyboardMarkup:
     )
 
 
+def pending_payments_choose(pendings: list[dict]) -> InlineKeyboardMarkup:
+    """Выбор турнира, к которому относится присланный скрин."""
+    rows = [
+        [InlineKeyboardButton(text=(p.get("title") or "Турнир")[:60],
+                              callback_data=f"payscr:{p['registration_id']}")]
+        for p in pendings
+    ]
+    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def pay_choice(rid: int, pays_for: str = "self") -> InlineKeyboardMarkup:
     """Выбор «за себя / за обоих». Текущий выбор помечается галочкой."""
     self_mark = "✅ " if pays_for == "self" else ""
