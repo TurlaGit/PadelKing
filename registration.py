@@ -10,13 +10,14 @@
 import logging
 import re
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 import db
 from content import load_content
 from keyboards import main_menu, reg_cancel, reg_name, reg_partner_choice
+from partners import notify_named_partner
 from states import Register
 
 log = logging.getLogger(__name__)
@@ -124,7 +125,7 @@ async def partner_known(cb: CallbackQuery, state: FSMContext):
 
 
 @router.message(Register.partner_username, F.text)
-async def partner_received(message: Message, state: FSMContext):
+async def partner_received(message: Message, state: FSMContext, bot: Bot):
     raw = (message.text or "").strip().lstrip("@")
     if not _USERNAME_RE.match(raw):
         await message.answer(
@@ -161,12 +162,26 @@ async def partner_received(message: Message, state: FSMContext):
         partner_username=raw,
     )
     log.info("registration %s created (player=%s, partner=@%s)", rid, message.from_user.id, raw)
-    await _finish(
-        message,
-        state,
-        f"✅ Готово! Записал тебя в пару с <b>@{raw}</b>.\n"
-        "Дальше подтвердим партнёра и пришлём реквизиты на оплату.",
-    )
+
+    result = await notify_named_partner(bot, rid)
+    if result["mode"] == "direct":
+        await _finish(
+            message,
+            state,
+            f"✅ Готово! Отправил <b>@{raw}</b> запрос на подтверждение.\n"
+            "Как только он подтвердит — пришлём реквизиты на оплату.",
+        )
+    else:
+        await state.clear()
+        await message.answer(
+            f"⚠️ <b>@{raw}</b> ещё не запускал бота, поэтому я не могу написать ему первым.\n"
+            "Перешли ему сообщение ниже 👇"
+        )
+        await message.answer(result["forward_text"])
+        await message.answer(
+            "Как только партнёр подтвердит участие по ссылке — пришлём реквизиты.",
+            reply_markup=main_menu(),
+        )
 
 
 @router.callback_query(F.data == "pc:looking")

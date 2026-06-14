@@ -421,6 +421,66 @@ async def get_registration(rid: int) -> dict | None:
         return dict(row) if row else None
 
 
+async def bind_partner(
+    rid: int,
+    partner_user_id: int,
+    partner_name: str | None,
+    partner_username: str | None,
+) -> str:
+    """Привязывает партнёра к записи (по подтверждению). Атомарно.
+    Возвращает: 'ok' | 'stale' | 'self' | 'partner_busy'.
+    На 'ok' статус записи становится 'active' (лимит/лист ожидания — шаг 1.5).
+    """
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await conn.execute("SELECT * FROM registrations WHERE id=?", (rid,))
+            reg = await cur.fetchone()
+            if not reg or reg["status"] != "pending_confirm":
+                await conn.rollback()
+                return "stale"
+            if partner_user_id == reg["player_user_id"]:
+                await conn.rollback()
+                return "self"
+
+            placeholders = ",".join("?" * len(ACTIVE_REG_STATUSES))
+            cur = await conn.execute(
+                f"""
+                SELECT id FROM registrations
+                WHERE tournament_id=? AND id<>?
+                  AND status IN ({placeholders})
+                  AND (player_user_id=? OR partner_user_id=?)
+                LIMIT 1
+                """,
+                (reg["tournament_id"], rid, *ACTIVE_REG_STATUSES,
+                 partner_user_id, partner_user_id),
+            )
+            if await cur.fetchone():
+                await conn.rollback()
+                return "partner_busy"
+
+            await conn.execute(
+                "UPDATE registrations SET partner_user_id=?, partner_name=?, "
+                "partner_username=?, status='active', updated_at=? WHERE id=?",
+                (partner_user_id, partner_name, partner_username, _now(), rid),
+            )
+            await conn.commit()
+            return "ok"
+        except Exception:
+            await conn.rollback()
+            raise
+
+
+async def set_registration_status(rid: int, status: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE registrations SET status=?, updated_at=? WHERE id=?",
+            (status, _now(), rid),
+        )
+        await conn.commit()
+
+
 async def get_registrations(tid: str, statuses: tuple[str, ...] | None = None) -> list[dict]:
     statuses = statuses or ACTIVE_REG_STATUSES
     placeholders = ",".join("?" * len(statuses))

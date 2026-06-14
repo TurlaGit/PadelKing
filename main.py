@@ -8,6 +8,7 @@ from aiogram.enums import ParseMode
 import config
 import db
 import handlers
+import partners
 import registration
 from content import load_content
 
@@ -63,6 +64,7 @@ async def main() -> None:
     # known_users-кеш на уровне диспетчера → покрывает все роутеры
     dp.message.middleware(handlers.KnownUsersMiddleware())
     dp.callback_query.middleware(handlers.KnownUsersMiddleware())
+    dp.include_router(partners.router)
     dp.include_router(registration.router)
     dp.include_router(handlers.router)
 

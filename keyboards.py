@@ -77,6 +77,18 @@ def reg_cancel() -> InlineKeyboardMarkup:
     )
 
 
+def partner_confirm(rid: int) -> InlineKeyboardMarkup:
+    """Кнопки в DM партнёру: подтвердить / отказаться от участия в паре."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"pconf:{rid}:yes"),
+                InlineKeyboardButton(text="❌ Отказаться", callback_data=f"pconf:{rid}:no"),
+            ],
+        ]
+    )
+
+
 def announce_button(tid: str, label: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
