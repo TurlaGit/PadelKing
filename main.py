@@ -5,6 +5,7 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
+import admin
 import config
 import db
 import handlers
@@ -66,6 +67,7 @@ async def main() -> None:
     # known_users-кеш на уровне диспетчера → покрывает все роутеры
     dp.message.middleware(handlers.KnownUsersMiddleware())
     dp.callback_query.middleware(handlers.KnownUsersMiddleware())
+    dp.include_router(admin.router)
     dp.include_router(partners.router)
     dp.include_router(matchmaking.router)
     dp.include_router(payments.router)

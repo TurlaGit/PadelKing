@@ -7,6 +7,12 @@ class Register(StatesGroup):
     partner_username = State()  # ждём @ник партнёра
 
 
+class AddPair(StatesGroup):
+    """Админ добавляет пару вручную (Этап 2.4)."""
+    player = State()
+    partner = State()
+
+
 class AdminTournament(StatesGroup):
     """Визард создания турнира (Этап 4). Заглушка под будущие шаги."""
     pass

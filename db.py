@@ -856,6 +856,68 @@ async def approve_payment(payment_id: int, mode: str, admin_id: int) -> dict | N
             raise
 
 
+async def confirm_payment_manual(rid: int, scope: str, admin_id: int) -> list[int]:
+    """Ручное подтверждение без скрина. scope: 'both'|'player'|'partner'.
+    Возвращает user_id, кого затронули (для уведомления)."""
+    whos = ["player", "partner"] if scope == "both" else [scope]
+    affected: list[int] = []
+    now = _now()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        for who in whos:
+            cur = await conn.execute(
+                "SELECT user_id FROM payments WHERE registration_id=? AND who=?",
+                (rid, who),
+            )
+            row = await cur.fetchone()
+            await conn.execute(
+                "UPDATE payments SET status='paid_manual', reviewed_by=?, "
+                "reviewed_at=?, updated_at=? WHERE registration_id=? AND who=?",
+                (admin_id, now, now, rid, who),
+            )
+            if row and row["user_id"]:
+                affected.append(row["user_id"])
+        await conn.commit()
+    return affected
+
+
+async def create_manual_pair(
+    tid: str,
+    player_name: str,
+    player_username: str | None,
+    player_user_id: int | None,
+    partner_name: str,
+    partner_username: str | None,
+    partner_user_id: int | None,
+) -> int:
+    """Админ добавляет готовую пару (нал/форс-мажор) — сразу в основной
+    состав, обе оплаты paid_manual, без напоминаний. Возвращает rid."""
+    now = _now()
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """
+            INSERT INTO registrations
+                (tournament_id, player_user_id, player_name, player_username,
+                 partner_user_id, partner_name, partner_username,
+                 is_looking_for_partner, is_waitlist, status, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0, 'active', ?, ?)
+            RETURNING id
+            """,
+            (tid, player_user_id, player_name, player_username,
+             partner_user_id, partner_name, partner_username, now, now),
+        )
+        rid = int((await cur.fetchone())[0])
+        for who, uid in [("player", player_user_id), ("partner", partner_user_id)]:
+            await conn.execute(
+                "INSERT INTO payments (registration_id, who, user_id, status, "
+                "pays_for, reviewed_by, reviewed_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, 'paid_manual', 'self', NULL, ?, ?, ?)",
+                (rid, who, uid, now, now, now),
+            )
+        await conn.commit()
+        return rid
+
+
 async def reject_payment(payment_id: int, admin_id: int) -> dict | None:
     async with aiosqlite.connect(DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row

@@ -1,0 +1,221 @@
+"""Этап 2.4 — мини-админка оплат (для ADMIN_IDS).
+
+/payments — статусы оплат по турниру + ручное подтверждение по игроку.
+/addpair  — добавить готовую пару вручную (нал/форс-мажор), без напоминаний.
+
+Полный визард создания турнира и аналитика — Этап 4.
+"""
+import logging
+
+from aiogram import Bot, F, Router
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Message,
+)
+
+import db
+from announcement import refresh_announcement
+from config import ADMIN_IDS
+from formatting import esc
+from states import AddPair
+
+log = logging.getLogger(__name__)
+router = Router()
+
+_ICON = {"paid": "✅", "paid_manual": "✅", "pending_review": "🧾",
+         "rejected": "❌", "unpaid": "⏳"}
+_RU = {"paid": "оплачено", "paid_manual": "оплачено (вручную)",
+       "pending_review": "на проверке", "rejected": "отклонено", "unpaid": "не оплачено"}
+
+
+def _is_admin(uid: int) -> bool:
+    return uid in ADMIN_IDS
+
+
+def _tournaments_kb(tournaments: list[dict], prefix: str) -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=t["title"][:60], callback_data=f"{prefix}:{t['id']}")]
+        for t in tournaments
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _roster(tid: str):
+    t = await db.get_tournament(tid)
+    main = await db.get_main_registrations(tid)
+    lines = [f"💳 <b>Оплаты — {esc(t['title'])}</b>", ""]
+    kb: list[list[InlineKeyboardButton]] = []
+    if not main:
+        lines.append("— пока никого нет")
+    for i, reg in enumerate(main, 1):
+        a = esc(reg.get("player_name") or "—")
+        if reg["status"] == "looking":
+            lines.append(f"{i}. {a} + 🔍 ищет партнёра")
+            continue
+        b = esc(reg.get("partner_name") or "—")
+        pays = {p["who"]: p for p in await db.get_pair_payments(reg["id"])}
+
+        def cell(who):
+            p = pays.get(who)
+            if not p:
+                return "—"
+            return f"{_ICON.get(p['status'], '?')} {_RU.get(p['status'], p['status'])}"
+
+        lines.append(f"{i}. {a} + {b}")
+        lines.append(f"   • {a}: {cell('player')}\n   • {b}: {cell('partner')}")
+        kb.append([InlineKeyboardButton(
+            text=f"💳 {i}. {reg.get('player_name')} + {reg.get('partner_name')}"[:60],
+            callback_data=f"apm:{reg['id']}",
+        )])
+    kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"apay:{tid}")])
+    return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+async def _safe_edit(message: Message, text: str, kb) -> None:
+    try:
+        await message.edit_text(text, reply_markup=kb)
+    except Exception:
+        await message.answer(text, reply_markup=kb)
+
+
+# ---------- /payments ----------
+
+@router.message(Command("payments"))
+async def cmd_payments(message: Message):
+    if not _is_admin(message.from_user.id):
+        return
+    ts = await db.list_active_tournaments()
+    if not ts:
+        await message.answer("Активных турниров нет.")
+        return
+    await message.answer("💳 Оплаты — выбери турнир:", reply_markup=_tournaments_kb(ts, "apay"))
+
+
+@router.callback_query(F.data.startswith("apay:"))
+async def show_roster(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    tid = cb.data.split(":", 1)[1]
+    text, kb = await _roster(tid)
+    await _safe_edit(cb.message, text, kb)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("apm:"))
+async def manage_pair(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    rid = int(cb.data.split(":", 1)[1])
+    reg = await db.get_registration(rid)
+    if not reg:
+        await cb.answer("Не найдено.", show_alert=True)
+        return
+    a = reg.get("player_name") or "Игрок"
+    b = reg.get("partner_name") or "Партнёр"
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Подтвердить обоих", callback_data=f"amc:{rid}:both")],
+        [InlineKeyboardButton(text=f"✅ Только {a}"[:60], callback_data=f"amc:{rid}:player")],
+        [InlineKeyboardButton(text=f"✅ Только {b}"[:60], callback_data=f"amc:{rid}:partner")],
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"apay:{reg['tournament_id']}")],
+    ])
+    await _safe_edit(cb.message, f"Пара: <b>{esc(a)} + {esc(b)}</b>\nОтметить оплату вручную:", kb)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("amc:"))
+async def manual_confirm(cb: CallbackQuery, bot: Bot):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    _, rid_s, scope = cb.data.split(":")
+    rid = int(rid_s)
+    reg = await db.get_registration(rid)
+    affected = await db.confirm_payment_manual(rid, scope, cb.from_user.id)
+    t = await db.get_tournament(reg["tournament_id"])
+    title = esc(t["title"]) if t else "турнир"
+    for uid in affected:
+        try:
+            await bot.send_message(
+                uid, f"✅ Оплата за турнир «{title}» подтверждена. Ждём на корте! 🎾"
+            )
+        except Exception:
+            pass
+    text, kb = await _roster(reg["tournament_id"])
+    await _safe_edit(cb.message, text, kb)
+    await cb.answer("Отмечено ✅")
+
+
+# ---------- /addpair ----------
+
+@router.message(Command("addpair"))
+async def cmd_addpair(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        return
+    ts = await db.list_active_tournaments()
+    if not ts:
+        await message.answer("Активных турниров нет.")
+        return
+    await state.clear()
+    await message.answer(
+        "➕ Добавить пару вручную — выбери турнир:",
+        reply_markup=_tournaments_kb(ts, "aap"),
+    )
+
+
+@router.callback_query(F.data.startswith("aap:"))
+async def addpair_tid(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    tid = cb.data.split(":", 1)[1]
+    await state.set_state(AddPair.player)
+    await state.update_data(tid=tid)
+    await cb.message.answer("Игрок 1 — пришли <b>@ник</b> или имя:")
+    await cb.answer()
+
+
+async def _resolve(token: str):
+    """(имя, user_id|None, username|None) из @ника или свободного имени."""
+    token = token.strip()
+    if token.startswith("@"):
+        u = await db.find_user_by_username(token)
+        if u:
+            name = " ".join(filter(None, [u["first_name"], u["last_name"]])) \
+                or u["username"] or token.lstrip("@")
+            return name, u["user_id"], u["username"]
+        return token.lstrip("@"), None, token.lstrip("@")
+    return token, None, None
+
+
+@router.message(AddPair.player, F.text)
+async def addpair_player(message: Message, state: FSMContext):
+    await state.update_data(player=message.text.strip())
+    await state.set_state(AddPair.partner)
+    await message.answer("Игрок 2 — пришли <b>@ник</b> или имя:")
+
+
+@router.message(AddPair.partner, F.text)
+async def addpair_partner(message: Message, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    tid = data.get("tid")
+    if not tid:
+        await state.clear()
+        await message.answer("Что-то пошло не так, начни заново: /addpair")
+        return
+    pl_name, pl_uid, pl_uname = await _resolve(data.get("player", ""))
+    pa_name, pa_uid, pa_uname = await _resolve(message.text)
+    rid = await db.create_manual_pair(
+        tid, pl_name, pl_uname, pl_uid, pa_name, pa_uname, pa_uid
+    )
+    await state.clear()
+    await message.answer(
+        f"✅ Пара добавлена и отмечена оплаченной:\n<b>{esc(pl_name)} + {esc(pa_name)}</b>"
+    )
+    await refresh_announcement(bot, tid)
+    log.info("manual pair %s added to %s by admin %s", rid, tid, message.from_user.id)
