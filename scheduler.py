@@ -14,13 +14,15 @@ import db
 from announcement import refresh_announcement
 from config import ADMIN_IDS
 from formatting import esc
+from keyboards import pair_declined_options
 from timeutils import from_iso, now_wita, to_iso
 
 log = logging.getLogger(__name__)
 
-SCAN_INTERVAL = 60          # секунд между сканами
-FINISH_GRACE_HOURS = 2      # турнир «прошёл» через 2ч после старта
-PROMO_WINDOW_HOURS = 5      # окно оплаты для поднятых из листа ожидания
+SCAN_INTERVAL = 60            # секунд между сканами
+FINISH_GRACE_HOURS = 2        # турнир «прошёл» через 2ч после старта
+PROMO_WINDOW_HOURS = 5        # окно оплаты для поднятых из листа ожидания
+SCREENSHOT_TTL_DAYS = 14      # сколько храним скрины после турнира
 
 
 async def _dm(bot: Bot, uid: int, text: str, **kw) -> None:
@@ -164,6 +166,22 @@ async def _notify_promoted(bot: Bot, promoted: dict, title: str) -> None:
             await _dm(bot, uid, text)
 
 
+async def expire_pair_requests(bot: Bot, now) -> None:
+    """Протухание заявок в пару (24ч/до дедлайна) с уведомлением автора."""
+    for r in await db.expire_due_pair_requests(to_iso(now)):
+        await _dm(bot, r["from_user_id"],
+            f"⌛ Твоя заявка в пару на турнир «{esc(r.get('title') or 'турнир')}» "
+            "истекла без ответа. Что дальше?",
+            reply_markup=pair_declined_options(r["tournament_id"]))
+
+
+async def cleanup_screenshots(bot: Bot, now) -> None:
+    cutoff = to_iso(now - timedelta(days=SCREENSHOT_TTL_DAYS))
+    n = await db.cleanup_old_screenshots(cutoff)
+    if n:
+        log.info("Удалено старых скринов: %d", n)
+
+
 async def _tick(bot: Bot) -> None:
     now = now_wita()
     await publish_scheduled(bot, now)
@@ -172,6 +190,8 @@ async def _tick(bot: Bot) -> None:
     await payment_reminders(bot, now)
     await notify_yana_unpaid(bot, now)
     await auto_remove_unpaid(bot, now)
+    await expire_pair_requests(bot, now)
+    await cleanup_screenshots(bot, now)
 
 
 async def run_scheduler(bot: Bot) -> None:

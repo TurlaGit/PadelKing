@@ -1396,6 +1396,52 @@ async def remove_registration_unpaid(rid: int, promo_iso: str | None) -> dict | 
             raise
 
 
+async def expire_due_pair_requests(now_iso: str) -> list[dict]:
+    """Протухшие заявки (pending с истёкшим expires_at) → expired.
+    Возвращает протухшие (для уведомления авторов)."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await conn.execute(
+                "SELECT pr.*, t.title FROM pair_requests pr "
+                "JOIN tournaments t ON t.id=pr.tournament_id "
+                "WHERE pr.status='pending' AND pr.expires_at IS NOT NULL "
+                "AND pr.expires_at<=?",
+                (now_iso,),
+            )
+            rows = [dict(r) for r in await cur.fetchall()]
+            for r in rows:
+                await conn.execute(
+                    "UPDATE pair_requests SET status='expired', resolved_at=? WHERE id=?",
+                    (_now(), r["id"]),
+                )
+            await conn.commit()
+            return rows
+        except Exception:
+            await conn.rollback()
+            raise
+
+
+async def cleanup_old_screenshots(cutoff_iso: str) -> int:
+    """Удаляет file_id скринов у завершённых >cutoff турниров
+    (банковские данные не храним дольше нужного). Возвращает число."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """
+            UPDATE payments SET screenshot_file_id=NULL
+            WHERE screenshot_file_id IS NOT NULL
+              AND registration_id IN (
+                SELECT r.id FROM registrations r JOIN tournaments t ON t.id=r.tournament_id
+                WHERE t.start_at IS NOT NULL AND t.start_at < ?
+              )
+            """,
+            (cutoff_iso,),
+        )
+        await conn.commit()
+        return cur.rowcount
+
+
 async def list_unnotified_published() -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
