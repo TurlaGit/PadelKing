@@ -47,6 +47,36 @@ def tournament_card(tid: str, user_registered: bool) -> InlineKeyboardMarkup:
     )
 
 
+def reg_name(tg_name: str) -> InlineKeyboardMarkup:
+    """Шаг «как тебя записать» в FSM записи."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"✅ {tg_name}"[:60], callback_data="rn:tg")],
+            [InlineKeyboardButton(text="✏️ Ввести другое имя", callback_data="rn:edit")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="rn:cancel")],
+        ]
+    )
+
+
+def reg_partner_choice() -> InlineKeyboardMarkup:
+    """Шаг «с кем играешь»."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="👥 Знаю партнёра", callback_data="pc:known")],
+            [InlineKeyboardButton(text="🔍 Ищу партнёра", callback_data="pc:looking")],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="rn:cancel")],
+        ]
+    )
+
+
+def reg_cancel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="rn:cancel")],
+        ]
+    )
+
+
 def announce_button(tid: str, label: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[

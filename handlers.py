@@ -35,10 +35,6 @@ class KnownUsersMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
-router.message.middleware(KnownUsersMiddleware())
-router.callback_query.middleware(KnownUsersMiddleware())
-
-
 def _texts() -> dict:
     return load_content()["texts"]
 

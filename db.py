@@ -344,6 +344,99 @@ async def add_format(value: str) -> None:
         await conn.commit()
 
 
+# ============================================================
+#  registrations — записи-пары (Этап 1.2+)
+# ============================================================
+
+# Статусы, при которых запись считается «живой» (занимает человека).
+ACTIVE_REG_STATUSES = ("looking", "pending_confirm", "active", "waitlist")
+
+
+async def get_user_registration_in(tid: str, user_id: int) -> dict | None:
+    """Живая запись, где user участвует как игрок ИЛИ как партнёр."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        placeholders = ",".join("?" * len(ACTIVE_REG_STATUSES))
+        cur = await conn.execute(
+            f"""
+            SELECT * FROM registrations
+            WHERE tournament_id=?
+              AND status IN ({placeholders})
+              AND (player_user_id=? OR partner_user_id=?)
+            ORDER BY id ASC LIMIT 1
+            """,
+            (tid, *ACTIVE_REG_STATUSES, user_id, user_id),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def create_registration(
+    tid: str,
+    player_user_id: int,
+    player_name: str,
+    player_username: str | None,
+    partner_username: str | None = None,
+    looking: bool = False,
+) -> int:
+    """Создаёт запись-пару.
+    looking=True  → слот «ищет партнёра» (status='looking').
+    иначе         → партнёр указан ником, ждём привязки/подтверждения
+                    (status='pending_confirm'). Привязку user_id и
+                    уведомления делает шаг 1.3.
+    Возвращает id новой записи.
+    """
+    now = _now()
+    if looking:
+        status, is_looking, partner_username = "looking", 1, None
+    else:
+        status, is_looking = "pending_confirm", 0
+        partner_username = (partner_username or "").lstrip("@").strip() or None
+
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """
+            INSERT INTO registrations
+                (tournament_id, player_user_id, player_name, player_username,
+                 partner_username, is_looking_for_partner, status,
+                 created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
+            """,
+            (
+                tid, player_user_id, player_name, player_username,
+                partner_username, is_looking, status, now, now,
+            ),
+        )
+        rid = (await cur.fetchone())[0]
+        await conn.commit()
+        return int(rid)
+
+
+async def get_registration(rid: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("SELECT * FROM registrations WHERE id=?", (rid,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def get_registrations(tid: str, statuses: tuple[str, ...] | None = None) -> list[dict]:
+    statuses = statuses or ACTIVE_REG_STATUSES
+    placeholders = ",".join("?" * len(statuses))
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            f"""
+            SELECT * FROM registrations
+            WHERE tournament_id=? AND status IN ({placeholders})
+            ORDER BY COALESCE(slot_index, 1000000), id ASC
+            """,
+            (tid, *statuses),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
 async def upsert_tournament(t: dict) -> None:
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(
