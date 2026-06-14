@@ -1194,6 +1194,63 @@ async def get_user_live_registrations(user_id: int) -> list[dict]:
         return [dict(r) for r in await cur.fetchall()]
 
 
+# ============================================================
+#  Аналитика (Этап 4.3)
+# ============================================================
+
+async def top_participants(limit: int = 10) -> list[dict]:
+    """Топ игроков по числу участий (как игрок ИЛИ партнёр, статус active)."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            """
+            WITH parts AS (
+                SELECT player_user_id AS uid, player_name AS nm, player_username AS un
+                FROM registrations WHERE status='active' AND player_user_id IS NOT NULL
+                UNION ALL
+                SELECT partner_user_id AS uid, partner_name AS nm, partner_username AS un
+                FROM registrations WHERE status='active' AND partner_user_id IS NOT NULL
+            )
+            SELECT uid, COUNT(*) AS cnt, MAX(nm) AS nm, MAX(un) AS un
+            FROM parts GROUP BY uid ORDER BY cnt DESC, nm ASC LIMIT ?
+            """,
+            (limit,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def tournament_financials(tid: str) -> dict:
+    """Итоги по оплатам турнира: сколько оплачено, ожидается, сумма."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            """
+            SELECT
+                SUM(CASE WHEN p.status IN ('paid','paid_manual') THEN 1 ELSE 0 END) AS paid,
+                COUNT(*) AS total
+            FROM payments p
+            JOIN registrations r ON r.id = p.registration_id
+            WHERE r.tournament_id=? AND r.status='active'
+            """,
+            (tid,),
+        )
+        row = await cur.fetchone()
+        paid = row["paid"] or 0
+        total = row["total"] or 0
+        cur = await conn.execute(
+            "SELECT price_amount, currency FROM tournaments WHERE id=?", (tid,)
+        )
+        t = await cur.fetchone()
+        price = (t["price_amount"] or 0) if t else 0
+        currency = (t["currency"] or "") if t else ""
+        return {
+            "paid": paid,
+            "total": total,
+            "amount": paid * price,
+            "currency": currency,
+        }
+
+
 async def set_announce_message(tid: str, chat_id: int, message_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(

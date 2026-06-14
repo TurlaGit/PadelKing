@@ -92,8 +92,82 @@ async def cmd_admin(message: Message):
         [InlineKeyboardButton(text="➕ Создать турнир", callback_data="tw:start")],
         [InlineKeyboardButton(text="💳 Оплаты", callback_data="adm:payments")],
         [InlineKeyboardButton(text="➕ Добавить пару вручную", callback_data="adm:addpair")],
+        [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm:analytics")],
     ])
     await message.answer("⚙️ <b>Админка PadelKing</b>", reply_markup=kb)
+
+
+def _fmt_money(amount, currency: str) -> str:
+    if float(amount).is_integer():
+        amount = f"{int(amount):,}".replace(",", ".")
+    return f"{amount} {currency}".strip()
+
+
+@router.callback_query(F.data == "adm:analytics")
+async def adm_analytics(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏅 Топ-10 участников", callback_data="adm:top")],
+        [InlineKeyboardButton(text="💰 Итоги турнира", callback_data="adm:results")],
+    ])
+    await cb.message.answer("📊 Аналитика:", reply_markup=kb)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:top")
+async def adm_top(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    top = await db.top_participants(10)
+    if not top:
+        await cb.message.answer("Пока нет данных об участиях.")
+        await cb.answer()
+        return
+    medals = ["🥇", "🥈", "🥉"] + ["▫️"] * 7
+    lines = ["🏅 <b>Топ-10 участников</b>", ""]
+    for i, r in enumerate(top):
+        name = esc(r.get("nm") or "Игрок")
+        un = f" @{esc(r['un'])}" if r.get("un") else ""
+        lines.append(f"{medals[i]} {name}{un} — <b>{r['cnt']}</b>")
+    await cb.message.answer("\n".join(lines))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:results")
+async def adm_results(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    ts = await db.list_active_tournaments()
+    if not ts:
+        await cb.message.answer("Активных турниров нет.")
+        await cb.answer()
+        return
+    await cb.message.answer("💰 Итоги — выбери турнир:", reply_markup=_tournaments_kb(ts, "ares"))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("ares:"))
+async def adm_results_show(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    tid = cb.data.split(":", 1)[1]
+    t = await db.get_tournament(tid)
+    fin = await db.tournament_financials(tid)
+    pairs = len(await db.get_main_registrations(tid))
+    lines = [
+        f"💰 <b>Итоги — {esc(t['title'])}</b>",
+        "",
+        f"Пар в составе: <b>{pairs}</b>",
+        f"Оплатили: <b>{fin['paid']}</b> из {fin['total']} игроков",
+        f"Собрано: <b>{_fmt_money(fin['amount'], fin['currency'])}</b>",
+    ]
+    await cb.message.answer("\n".join(lines))
+    await cb.answer()
 
 
 @router.callback_query(F.data == "adm:payments")
