@@ -165,6 +165,8 @@ _TOURNAMENT_NEW_COLUMNS: list[tuple[str, str]] = [
     ("pinned",           "INTEGER NOT NULL DEFAULT 0"),
     # draft | scheduled | published | finished | cancelled
     ("status_v2",        "TEXT"),
+    # 'content' (из content.md) | 'admin' (создан визардом)
+    ("source",           "TEXT"),
 ]
 
 # Колонки registrations, добавляемые миграцией к уже созданным БД.
@@ -1074,8 +1076,8 @@ async def upsert_tournament(t: dict) -> None:
             """
             INSERT INTO tournaments
                 (id, title, date, time, location, price, description,
-                 max_participants, group_chat_id, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                 max_participants, group_chat_id, is_active, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 'content')
             ON CONFLICT(id) DO UPDATE SET
                 title=excluded.title,
                 date=excluded.date,
@@ -1085,7 +1087,8 @@ async def upsert_tournament(t: dict) -> None:
                 description=excluded.description,
                 max_participants=excluded.max_participants,
                 group_chat_id=COALESCE(excluded.group_chat_id, tournaments.group_chat_id),
-                is_active=1
+                is_active=1,
+                source='content'
             """,
             (
                 t["id"],
@@ -1103,15 +1106,51 @@ async def upsert_tournament(t: dict) -> None:
 
 
 async def deactivate_missing(known_ids: list[str]) -> None:
-    if not known_ids:
-        return
-    placeholders = ",".join("?" * len(known_ids))
+    """Гасит только content-турниры, которых больше нет в content.md.
+    Турниры из визарда (source='admin') не трогаем."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        if known_ids:
+            placeholders = ",".join("?" * len(known_ids))
+            await conn.execute(
+                f"UPDATE tournaments SET is_active=0 "
+                f"WHERE source='content' AND id NOT IN ({placeholders})",
+                known_ids,
+            )
+        else:
+            await conn.execute(
+                "UPDATE tournaments SET is_active=0 WHERE source='content'"
+            )
+        await conn.commit()
+
+
+async def insert_tournament(data: dict) -> str:
+    """Создаёт турнир из визарда (source='admin'). Ожидает ключи:
+    id, title, format_type, date, time_start, time_end, location_id,
+    game_format, levels (JSON-строка), currency, price_amount, max_pairs,
+    extra_note, start_at, payment_deadline, publish_at, status_v2.
+    """
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(
-            f"UPDATE tournaments SET is_active=0 WHERE id NOT IN ({placeholders})",
-            known_ids,
+            """
+            INSERT INTO tournaments
+                (id, title, format_type, date, time_start, time_end, location_id,
+                 game_format, levels, currency, price_amount, max_pairs, extra_note,
+                 start_at, payment_deadline, publish_at, status_v2, is_active, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin')
+            """,
+            (
+                data["id"], data.get("title"), data.get("format_type"),
+                data.get("date"), data.get("time_start"), data.get("time_end"),
+                data.get("location_id"), data.get("game_format"),
+                data.get("levels"), data.get("currency"), data.get("price_amount"),
+                data.get("max_pairs"), data.get("extra_note"),
+                data.get("start_at"), data.get("payment_deadline"),
+                data.get("publish_at"), data.get("status_v2", "published"),
+                1 if data.get("publish_at") is None else 1,
+            ),
         )
         await conn.commit()
+        return data["id"]
 
 
 async def list_active_tournaments() -> list[dict]:

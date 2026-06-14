@@ -13,6 +13,7 @@ import matchmaking
 import partners
 import payments
 import registration
+import wizard
 from content import load_content
 
 logging.basicConfig(
@@ -68,6 +69,7 @@ async def main() -> None:
     dp.message.middleware(handlers.KnownUsersMiddleware())
     dp.callback_query.middleware(handlers.KnownUsersMiddleware())
     dp.include_router(admin.router)
+    dp.include_router(wizard.router)
     dp.include_router(partners.router)
     dp.include_router(matchmaking.router)
     dp.include_router(payments.router)

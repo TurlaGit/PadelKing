@@ -82,6 +82,49 @@ async def _safe_edit(message: Message, text: str, kb) -> None:
         await message.answer(text, reply_markup=kb)
 
 
+# ---------- /admin меню ----------
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message):
+    if not _is_admin(message.from_user.id):
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="➕ Создать турнир", callback_data="tw:start")],
+        [InlineKeyboardButton(text="💳 Оплаты", callback_data="adm:payments")],
+        [InlineKeyboardButton(text="➕ Добавить пару вручную", callback_data="adm:addpair")],
+    ])
+    await message.answer("⚙️ <b>Админка PadelKing</b>", reply_markup=kb)
+
+
+@router.callback_query(F.data == "adm:payments")
+async def adm_payments(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    ts = await db.list_active_tournaments()
+    if not ts:
+        await cb.message.answer("Активных турниров нет.")
+        await cb.answer()
+        return
+    await cb.message.answer("💳 Оплаты — выбери турнир:", reply_markup=_tournaments_kb(ts, "apay"))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:addpair")
+async def adm_addpair(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    ts = await db.list_active_tournaments()
+    if not ts:
+        await cb.message.answer("Активных турниров нет.")
+        await cb.answer()
+        return
+    await state.clear()
+    await cb.message.answer("➕ Добавить пару — выбери турнир:", reply_markup=_tournaments_kb(ts, "aap"))
+    await cb.answer()
+
+
 # ---------- /payments ----------
 
 @router.message(Command("payments"))

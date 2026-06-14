@@ -13,6 +13,16 @@ class AddPair(StatesGroup):
     partner = State()
 
 
-class AdminTournament(StatesGroup):
-    """Визард создания турнира (Этап 4). Заглушка под будущие шаги."""
-    pass
+class NewTournament(StatesGroup):
+    """Визард создания турнира (Этап 4)."""
+    title = State()
+    fmt_custom = State()
+    date = State()
+    time = State()
+    loc_new_title = State()
+    loc_new_url = State()
+    game_format = State()
+    lv_custom = State()
+    price = State()
+    max_pairs = State()
+    extra = State()
