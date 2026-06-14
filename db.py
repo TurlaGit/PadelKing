@@ -167,11 +167,16 @@ _TOURNAMENT_NEW_COLUMNS: list[tuple[str, str]] = [
     ("status_v2",        "TEXT"),
     # 'content' (из content.md) | 'admin' (создан визардом)
     ("source",           "TEXT"),
+    # Яне уже отправлен список неоплативших за час до дедлайна
+    ("unpaid_notified",  "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 # Колонки registrations, добавляемые миграцией к уже созданным БД.
 _REGISTRATION_NEW_COLUMNS: list[tuple[str, str]] = [
     ("is_waitlist", "INTEGER NOT NULL DEFAULT 0"),
+    # окно оплаты для поднятых из листа ожидания (ISO WITA), переопределяет
+    # стандартный дедлайн турнира
+    ("promo_deadline", "TEXT"),
 ]
 
 _BUILTIN_LEVELS = [
@@ -1299,6 +1304,112 @@ async def set_tournament_status_v2(tid: str, status: str) -> None:
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(
             "UPDATE tournaments SET status_v2=? WHERE id=?", (status, tid)
+        )
+        await conn.commit()
+
+
+async def get_unpaid_payment_candidates() -> list[dict]:
+    """Неоплаченные платёжные строки активных пар в опубликованных турнирах —
+    для цепочки напоминаний."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            """
+            SELECT p.id, p.user_id, p.reminder_stage,
+                   r.promo_deadline, r.id AS rid,
+                   t.payment_deadline, t.title, t.id AS tid
+            FROM payments p
+            JOIN registrations r ON r.id = p.registration_id
+            JOIN tournaments t ON t.id = r.tournament_id
+            WHERE p.status IN ('unpaid','rejected') AND r.status='active'
+              AND t.is_active=1 AND t.status_v2='published'
+            """
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def set_payment_reminder_stage(payment_id: int, stage: int, now_iso: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE payments SET reminder_stage=?, last_reminder_at=? WHERE id=?",
+            (stage, now_iso, payment_id),
+        )
+        await conn.commit()
+
+
+async def get_active_payment_state(tid: str | None = None) -> list[dict]:
+    """Активные пары с агрегатом оплат (для авто-снятия и списка неоплативших)."""
+    where = "r.status='active' AND t.is_active=1 AND t.status_v2='published'"
+    params: tuple = ()
+    if tid:
+        where += " AND r.tournament_id=?"
+        params = (tid,)
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            f"""
+            SELECT r.*, t.payment_deadline, t.title,
+                (SELECT COUNT(*) FROM payments p WHERE p.registration_id=r.id) AS pay_total,
+                (SELECT COUNT(*) FROM payments p WHERE p.registration_id=r.id
+                    AND p.status IN ('paid','paid_manual')) AS pay_paid
+            FROM registrations r JOIN tournaments t ON t.id=r.tournament_id
+            WHERE {where}
+            ORDER BY r.id
+            """,
+            params,
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def remove_registration_unpaid(rid: int, promo_iso: str | None) -> dict | None:
+    """Авто-снятие неоплаченной пары: status removed_unpaid, поднятие пары
+    из листа ожидания (с окном promo_iso, если задано)."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await conn.execute("SELECT * FROM registrations WHERE id=?", (rid,))
+            reg = await cur.fetchone()
+            if not reg or reg["status"] != "active":
+                await conn.rollback()
+                return None
+            members = [reg["player_user_id"], reg["partner_user_id"]]
+            tid = reg["tournament_id"]
+            await conn.execute(
+                "UPDATE registrations SET status='removed_unpaid', updated_at=? WHERE id=?",
+                (_now(), rid),
+            )
+            promoted = await _promote_one_from_waitlist(conn, tid)
+            if promoted and promo_iso:
+                await conn.execute(
+                    "UPDATE registrations SET promo_deadline=? WHERE id=?",
+                    (promo_iso, promoted["id"]),
+                )
+            await conn.commit()
+            return {
+                "tid": tid,
+                "member_ids": [m for m in members if m],
+                "promoted": promoted,
+            }
+        except Exception:
+            await conn.rollback()
+            raise
+
+
+async def list_unnotified_published() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM tournaments WHERE is_active=1 AND status_v2='published' "
+            "AND unpaid_notified=0 AND payment_deadline IS NOT NULL"
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def set_unpaid_notified(tid: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE tournaments SET unpaid_notified=1 WHERE id=?", (tid,)
         )
         await conn.commit()
 
