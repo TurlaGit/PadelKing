@@ -71,6 +71,7 @@ async def _roster(tid: str):
             text=f"💳 {i}. {reg.get('player_name')} + {reg.get('partner_name')}"[:60],
             callback_data=f"apm:{reg['id']}",
         )])
+    kb.append([InlineKeyboardButton(text="🗂 Снятые пары", callback_data=f"apcanc:{tid}")])
     kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"apay:{tid}")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -259,6 +260,8 @@ async def manage_pair(cb: CallbackQuery):
         [InlineKeyboardButton(text="✅ Подтвердить обоих", callback_data=f"amc:{rid}:both")],
         [InlineKeyboardButton(text=f"✅ Только {a}"[:60], callback_data=f"amc:{rid}:player")],
         [InlineKeyboardButton(text=f"✅ Только {b}"[:60], callback_data=f"amc:{rid}:partner")],
+        [InlineKeyboardButton(text=f"➖ Снять {a}"[:60], callback_data=f"apr:{rid}:player")],
+        [InlineKeyboardButton(text=f"➖ Снять {b}"[:60], callback_data=f"apr:{rid}:partner")],
         [InlineKeyboardButton(text="❌ Снять пару", callback_data=f"apdel:{rid}")],
         [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"apay:{reg['tournament_id']}")],
     ])
@@ -347,6 +350,88 @@ async def _notify_promoted(bot: Bot, promoted: dict, title: str) -> None:
                 await bot.send_message(uid, text)
             except Exception:
                 pass
+
+
+# ---------- снять одного игрока ----------
+
+@router.callback_query(F.data.startswith("apr:"))
+async def remove_player(cb: CallbackQuery, bot: Bot):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    _, rid_s, which = cb.data.split(":")
+    rid = int(rid_s)
+    res = await db.remove_one_player(rid, which)
+    if not res:
+        await cb.answer("Нельзя снять (пара уже не активна).", show_alert=True)
+        return
+    t = await db.get_tournament(res["tid"])
+    title = esc(t["title"]) if t else "турнир"
+    if res["removed_uid"]:
+        try:
+            await bot.send_message(res["removed_uid"],
+                f"❌ Организатор снял твою запись на турнир «{title}».")
+        except Exception:
+            pass
+    if res["remaining_uid"]:
+        try:
+            await bot.send_message(res["remaining_uid"],
+                f"⚠️ Твой партнёр снят с турнира «{title}». Ты остался в списке как "
+                "«ищет партнёра» — можешь найти нового напарника.")
+        except Exception:
+            pass
+    await refresh_announcement(bot, res["tid"])
+    text, kb = await _roster(res["tid"])
+    await _safe_edit(cb.message, text, kb)
+    await cb.answer("Игрок снят, второй ищет партнёра")
+
+
+# ---------- снятые пары: вернуть ----------
+
+@router.callback_query(F.data.startswith("apcanc:"))
+async def cancelled_list(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    tid = cb.data.split(":", 1)[1]
+    rows = await db.list_cancelled_registrations(tid)
+    if not rows:
+        await cb.answer("Снятых пар нет.", show_alert=True)
+        return
+    kb = []
+    for r in rows:
+        a = r.get("player_name") or "—"
+        b = r.get("partner_name") or ("🔍" if r["is_looking_for_partner"] else "—")
+        kb.append([InlineKeyboardButton(
+            text=f"↩️ {a} + {b}"[:60], callback_data=f"arest:{r['id']}")])
+    kb.append([InlineKeyboardButton(text="⬅️ Назад", callback_data=f"apay:{tid}")])
+    await _safe_edit(cb.message, "🗂 Снятые пары — нажми, чтобы вернуть:",
+                     InlineKeyboardMarkup(inline_keyboard=kb))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("arest:"))
+async def restore_pair(cb: CallbackQuery, bot: Bot):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    rid = int(cb.data.split(":", 1)[1])
+    res = await db.restore_registration(rid)
+    if not res:
+        await cb.answer("Нельзя вернуть.", show_alert=True)
+        return
+    t = await db.get_tournament(res["tid"])
+    title = esc(t["title"]) if t else "турнир"
+    note = " (в лист ожидания)" if res["waitlisted"] else ""
+    for uid in res["member_ids"]:
+        try:
+            await bot.send_message(uid, f"✅ Организатор вернул вашу запись на турнир «{title}»{note}.")
+        except Exception:
+            pass
+    await refresh_announcement(bot, res["tid"])
+    text, kb = await _roster(res["tid"])
+    await _safe_edit(cb.message, text, kb)
+    await cb.answer("Пара возвращена")
 
 
 # ---------- отмена турнира админом ----------

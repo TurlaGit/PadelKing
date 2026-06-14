@@ -1075,6 +1075,96 @@ async def cancel_registration_by_id(rid: int) -> dict | None:
             raise
 
 
+async def remove_one_player(rid: int, which: str) -> dict | None:
+    """Снимает одного игрока из пары; второй остаётся как «ищет партнёра».
+    which: 'player' | 'partner'. Платёжная строка снятого удаляется,
+    у оставшегося сохраняется. Возвращает {tid, removed_uid, remaining_uid}."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await conn.execute("SELECT * FROM registrations WHERE id=?", (rid,))
+            reg = await cur.fetchone()
+            if not reg or reg["status"] != "active":
+                await conn.rollback()
+                return None
+            now = _now()
+            if which == "partner":
+                removed_uid = reg["partner_user_id"]
+                remaining_uid = reg["player_user_id"]
+                await conn.execute(
+                    "UPDATE registrations SET partner_user_id=NULL, partner_name=NULL, "
+                    "partner_username=NULL, is_looking_for_partner=1, status='looking', "
+                    "updated_at=? WHERE id=?", (now, rid))
+                await conn.execute(
+                    "DELETE FROM payments WHERE registration_id=? AND who='partner'", (rid,))
+            else:  # снимаем игрока — партнёр занимает его место
+                removed_uid = reg["player_user_id"]
+                remaining_uid = reg["partner_user_id"]
+                await conn.execute(
+                    "UPDATE registrations SET player_user_id=?, player_name=?, "
+                    "player_username=?, partner_user_id=NULL, partner_name=NULL, "
+                    "partner_username=NULL, is_looking_for_partner=1, status='looking', "
+                    "updated_at=? WHERE id=?",
+                    (reg["partner_user_id"], reg["partner_name"], reg["partner_username"],
+                     now, rid))
+                await conn.execute(
+                    "DELETE FROM payments WHERE registration_id=? AND who='player'", (rid,))
+                await conn.execute(
+                    "UPDATE payments SET who='player', user_id=? "
+                    "WHERE registration_id=? AND who='partner'", (remaining_uid, rid))
+            await conn.commit()
+            return {"tid": reg["tournament_id"], "removed_uid": removed_uid,
+                    "remaining_uid": remaining_uid}
+        except Exception:
+            await conn.rollback()
+            raise
+
+
+async def list_cancelled_registrations(tid: str, limit: int = 15) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM registrations WHERE tournament_id=? "
+            "AND status IN ('cancelled','removed_unpaid') "
+            "ORDER BY updated_at DESC LIMIT ?",
+            (tid, limit),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def restore_registration(rid: int) -> dict | None:
+    """Возвращает снятую запись. Если места заняты — в лист ожидания."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await conn.execute("SELECT * FROM registrations WHERE id=?", (rid,))
+            reg = await cur.fetchone()
+            if not reg or reg["status"] not in ("cancelled", "removed_unpaid"):
+                await conn.rollback()
+                return None
+            if reg["is_looking_for_partner"]:
+                status = "looking"
+            elif reg["partner_user_id"]:
+                status = "active"
+            else:
+                status = "pending_confirm"
+            max_pairs = await _tournament_max_pairs(conn, reg["tournament_id"])
+            live = await _count_main_slots(conn, reg["tournament_id"])
+            is_wl = 1 if (max_pairs is not None and live >= max_pairs) else 0
+            await conn.execute(
+                "UPDATE registrations SET status=?, is_waitlist=?, promo_deadline=NULL, "
+                "updated_at=? WHERE id=?", (status, is_wl, _now(), rid))
+            await conn.commit()
+            members = [reg["player_user_id"], reg["partner_user_id"]]
+            return {"tid": reg["tournament_id"], "status": status, "waitlisted": bool(is_wl),
+                    "member_ids": [m for m in members if m]}
+        except Exception:
+            await conn.rollback()
+            raise
+
+
 async def cancel_tournament(tid: str) -> dict | None:
     """Отменяет турнир: помечает cancelled/неактивным, снимает все живые
     записи. Возвращает {title, member_ids, announce_chat_id, announce_message_id}."""
