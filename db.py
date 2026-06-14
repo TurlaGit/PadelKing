@@ -77,7 +77,9 @@ CREATE TABLE IF NOT EXISTS dict_formats (
 CREATE TABLE IF NOT EXISTS registrations (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     tournament_id            TEXT NOT NULL,
-    player_user_id           INTEGER NOT NULL,
+    -- обычно есть всегда; NULL допустим только для пар, добавленных
+    -- администратором вручную по имени (человек вне бота)
+    player_user_id           INTEGER,
     player_name              TEXT,
     player_username          TEXT,
     partner_user_id          INTEGER,

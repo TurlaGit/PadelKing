@@ -33,20 +33,6 @@ def tournaments_list(tournaments: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def tournament_card(tid: str, user_registered: bool) -> InlineKeyboardMarkup:
-    if user_registered:
-        action = InlineKeyboardButton(text="❌ Отменить запись", callback_data=f"cancel:{tid}")
-    else:
-        action = InlineKeyboardButton(text="✅ Записаться", callback_data=f"join:{tid}")
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [action],
-            [InlineKeyboardButton(text="« К списку", callback_data="list")],
-            [InlineKeyboardButton(text="« В меню", callback_data="menu")],
-        ]
-    )
-
-
 def reg_name(tg_name: str) -> InlineKeyboardMarkup:
     """Шаг «как тебя записать» в FSM записи."""
     return InlineKeyboardMarkup(
@@ -171,19 +157,6 @@ def my_registrations(regs: list[dict]) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(text=label[:60], callback_data=f"t:{r['tid']}")])
     rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
-
-
-def announce_button(tid: str, label: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=label,
-                    url=f"https://t.me/{BOT_USERNAME}?start={tid}",
-                )
-            ]
-        ]
-    )
 
 
 def announce_keyboard(
