@@ -84,7 +84,9 @@ CREATE TABLE IF NOT EXISTS registrations (
     partner_name             TEXT,
     partner_username         TEXT,
     is_looking_for_partner   INTEGER NOT NULL DEFAULT 0,
-    -- looking | pending_confirm | active | waitlist | cancelled | removed_unpaid
+    -- «лист ожидания» — отдельный флаг, чтобы не терять partner-состояние
+    is_waitlist              INTEGER NOT NULL DEFAULT 0,
+    -- looking | pending_confirm | active | cancelled | removed_unpaid
     status                   TEXT NOT NULL DEFAULT 'pending_confirm',
     slot_index               INTEGER,
     created_at               TEXT NOT NULL,
@@ -165,6 +167,11 @@ _TOURNAMENT_NEW_COLUMNS: list[tuple[str, str]] = [
     ("status_v2",        "TEXT"),
 ]
 
+# Колонки registrations, добавляемые миграцией к уже созданным БД.
+_REGISTRATION_NEW_COLUMNS: list[tuple[str, str]] = [
+    ("is_waitlist", "INTEGER NOT NULL DEFAULT 0"),
+]
+
 _BUILTIN_LEVELS = [
     "Beginner",
     "Low Bronze", "Mid Bronze", "High Bronze",
@@ -192,6 +199,13 @@ async def _migrate_tournaments(conn) -> None:
             await conn.execute(f"ALTER TABLE tournaments ADD COLUMN {name} {decl}")
 
 
+async def _migrate_registrations(conn) -> None:
+    existing = await _existing_columns(conn, "registrations")
+    for name, decl in _REGISTRATION_NEW_COLUMNS:
+        if name not in existing:
+            await conn.execute(f"ALTER TABLE registrations ADD COLUMN {name} {decl}")
+
+
 async def _seed_dictionaries(conn) -> None:
     now = _now()
     for v in _BUILTIN_LEVELS:
@@ -213,6 +227,7 @@ async def init_db() -> None:
         await conn.executescript(SCHEMA)
         await conn.executescript(SCHEMA_V2)
         await _migrate_tournaments(conn)
+        await _migrate_registrations(conn)
         await _seed_dictionaries(conn)
         await conn.commit()
 
@@ -348,8 +363,27 @@ async def add_format(value: str) -> None:
 #  registrations — записи-пары (Этап 1.2+)
 # ============================================================
 
-# Статусы, при которых запись считается «живой» (занимает человека).
-ACTIVE_REG_STATUSES = ("looking", "pending_confirm", "active", "waitlist")
+# Статусы, при которых запись «живая» (человек участвует или в листе ожидания).
+# Лист ожидания — флаг is_waitlist, а не отдельный статус.
+ACTIVE_REG_STATUSES = ("looking", "pending_confirm", "active")
+# Статусы, занимающие слот основного состава (для подсчёта лимита).
+SLOT_STATUSES = ("looking", "pending_confirm", "active")
+
+
+async def _tournament_max_pairs(conn, tid: str) -> int | None:
+    cur = await conn.execute("SELECT max_pairs FROM tournaments WHERE id=?", (tid,))
+    row = await cur.fetchone()
+    return row[0] if row else None
+
+
+async def _count_main_slots(conn, tid: str) -> int:
+    placeholders = ",".join("?" * len(SLOT_STATUSES))
+    cur = await conn.execute(
+        f"SELECT COUNT(*) FROM registrations "
+        f"WHERE tournament_id=? AND is_waitlist=0 AND status IN ({placeholders})",
+        (tid, *SLOT_STATUSES),
+    )
+    return (await cur.fetchone())[0]
 
 
 async def get_user_registration_in(tid: str, user_id: int) -> dict | None:
@@ -378,13 +412,14 @@ async def create_registration(
     player_username: str | None,
     partner_username: str | None = None,
     looking: bool = False,
-) -> int:
-    """Создаёт запись-пару.
-    looking=True  → слот «ищет партнёра» (status='looking').
-    иначе         → партнёр указан ником, ждём привязки/подтверждения
-                    (status='pending_confirm'). Привязку user_id и
-                    уведомления делает шаг 1.3.
-    Возвращает id новой записи.
+) -> dict:
+    """Создаёт запись-пару. Если основной состав заполнен (max_pairs) —
+    ставит в лист ожидания (is_waitlist=1). Атомарно.
+
+    looking=True → слот «ищет партнёра» (status='looking').
+    иначе        → партнёр по нику, status='pending_confirm' (привязка — 1.3).
+
+    Возвращает {'id': int, 'waitlisted': bool}.
     """
     now = _now()
     if looking:
@@ -394,23 +429,33 @@ async def create_registration(
         partner_username = (partner_username or "").lstrip("@").strip() or None
 
     async with aiosqlite.connect(DB_PATH) as conn:
-        cur = await conn.execute(
-            """
-            INSERT INTO registrations
-                (tournament_id, player_user_id, player_name, player_username,
-                 partner_username, is_looking_for_partner, status,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING id
-            """,
-            (
-                tid, player_user_id, player_name, player_username,
-                partner_username, is_looking, status, now, now,
-            ),
-        )
-        rid = (await cur.fetchone())[0]
-        await conn.commit()
-        return int(rid)
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            max_pairs = await _tournament_max_pairs(conn, tid)
+            live = await _count_main_slots(conn, tid)
+            is_waitlist = 1 if (max_pairs is not None and live >= max_pairs) else 0
+
+            cur = await conn.execute(
+                """
+                INSERT INTO registrations
+                    (tournament_id, player_user_id, player_name, player_username,
+                     partner_username, is_looking_for_partner, is_waitlist, status,
+                     created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    tid, player_user_id, player_name, player_username,
+                    partner_username, is_looking, is_waitlist, status, now, now,
+                ),
+            )
+            rid = int((await cur.fetchone())[0])
+            await conn.commit()
+            return {"id": rid, "waitlisted": bool(is_waitlist)}
+        except Exception:
+            await conn.rollback()
+            raise
 
 
 async def get_registration(rid: int) -> dict | None:
@@ -654,6 +699,106 @@ async def accept_pair_request(req_id: int) -> dict:
                 "player_user_id": reg["player_user_id"],
                 "partner_user_id": partner_id,
                 "notify_rejected": notify_rejected,
+            }
+        except Exception:
+            await conn.rollback()
+            raise
+
+
+async def get_main_registrations(tid: str) -> list[dict]:
+    """Пары основного состава (не в листе ожидания)."""
+    placeholders = ",".join("?" * len(SLOT_STATUSES))
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            f"SELECT * FROM registrations "
+            f"WHERE tournament_id=? AND is_waitlist=0 AND status IN ({placeholders}) "
+            f"ORDER BY id ASC",
+            (tid, *SLOT_STATUSES),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_waitlist_registrations(tid: str) -> list[dict]:
+    placeholders = ",".join("?" * len(SLOT_STATUSES))
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            f"SELECT * FROM registrations "
+            f"WHERE tournament_id=? AND is_waitlist=1 AND status IN ({placeholders}) "
+            f"ORDER BY id ASC",
+            (tid, *SLOT_STATUSES),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def _promote_one_from_waitlist(conn, tid: str) -> dict | None:
+    """Поднимает старейшую пару из листа ожидания, если есть свободный слот.
+    Выполняется внутри уже открытой транзакции conn."""
+    max_pairs = await _tournament_max_pairs(conn, tid)
+    live = await _count_main_slots(conn, tid)
+    if max_pairs is not None and live >= max_pairs:
+        return None
+    placeholders = ",".join("?" * len(SLOT_STATUSES))
+    cur = await conn.execute(
+        f"SELECT * FROM registrations "
+        f"WHERE tournament_id=? AND is_waitlist=1 AND status IN ({placeholders}) "
+        f"ORDER BY id ASC LIMIT 1",
+        (tid, *SLOT_STATUSES),
+    )
+    wl = await cur.fetchone()
+    if not wl:
+        return None
+    await conn.execute(
+        "UPDATE registrations SET is_waitlist=0, updated_at=? WHERE id=?",
+        (_now(), wl["id"]),
+    )
+    return dict(wl)
+
+
+async def cancel_my_registration(tid: str, user_id: int) -> dict | None:
+    """Игрок отменяет свою запись (как игрок ИЛИ как партнёр).
+    Освобождает слот, поднимает пару из листа ожидания.
+    Возвращает {'registration', 'other_user_id', 'promoted', 'was_waitlist'} или None.
+    """
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            placeholders = ",".join("?" * len(ACTIVE_REG_STATUSES))
+            cur = await conn.execute(
+                f"""
+                SELECT * FROM registrations
+                WHERE tournament_id=? AND status IN ({placeholders})
+                  AND (player_user_id=? OR partner_user_id=?)
+                ORDER BY id ASC LIMIT 1
+                """,
+                (tid, *ACTIVE_REG_STATUSES, user_id, user_id),
+            )
+            reg = await cur.fetchone()
+            if not reg:
+                await conn.rollback()
+                return None
+
+            was_waitlist = bool(reg["is_waitlist"])
+            other = (
+                reg["partner_user_id"]
+                if user_id == reg["player_user_id"]
+                else reg["player_user_id"]
+            )
+            await conn.execute(
+                "UPDATE registrations SET status='cancelled', updated_at=? WHERE id=?",
+                (_now(), reg["id"]),
+            )
+            promoted = None
+            if not was_waitlist:
+                promoted = await _promote_one_from_waitlist(conn, tid)
+            await conn.commit()
+            return {
+                "registration": dict(reg),
+                "other_user_id": other,
+                "promoted": promoted,
+                "was_waitlist": was_waitlist,
             }
         except Exception:
             await conn.rollback()

@@ -16,9 +16,21 @@ from aiogram.types import CallbackQuery, Message
 
 import db
 from content import load_content
-from keyboards import main_menu, reg_cancel, reg_name, reg_partner_choice
+from formatting import esc
+from keyboards import (
+    main_menu,
+    pair_declined_options,
+    reg_cancel,
+    reg_name,
+    reg_partner_choice,
+)
 from partners import notify_named_partner
 from states import Register
+
+_WAITLIST_NOTE = (
+    "\n\n📋 Основной состав заполнен — вы в <b>листе ожидания</b>. "
+    "Поднимем автоматически, как только освободится место."
+)
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -154,14 +166,17 @@ async def partner_received(message: Message, state: FSMContext, bot: Bot):
         await _finish(message, state, "Ты уже записан на этот турнир ✅")
         return
 
-    rid = await db.create_registration(
+    reg = await db.create_registration(
         tid=tid,
         player_user_id=message.from_user.id,
         player_name=data.get("name") or _tg_name(message.from_user),
         player_username=message.from_user.username,
         partner_username=raw,
     )
-    log.info("registration %s created (player=%s, partner=@%s)", rid, message.from_user.id, raw)
+    rid = reg["id"]
+    wl_note = _WAITLIST_NOTE if reg["waitlisted"] else ""
+    log.info("registration %s created (player=%s, partner=@%s, wl=%s)",
+             rid, message.from_user.id, raw, reg["waitlisted"])
 
     result = await notify_named_partner(bot, rid)
     if result["mode"] == "direct":
@@ -169,7 +184,7 @@ async def partner_received(message: Message, state: FSMContext, bot: Bot):
             message,
             state,
             f"✅ Готово! Отправил <b>@{raw}</b> запрос на подтверждение.\n"
-            "Как только он подтвердит — пришлём реквизиты на оплату.",
+            "Как только он подтвердит — пришлём реквизиты на оплату." + wl_note,
         )
     else:
         await state.clear()
@@ -179,7 +194,7 @@ async def partner_received(message: Message, state: FSMContext, bot: Bot):
         )
         await message.answer(result["forward_text"])
         await message.answer(
-            "Как только партнёр подтвердит участие по ссылке — пришлём реквизиты.",
+            "Как только партнёр подтвердит участие по ссылке — пришлём реквизиты." + wl_note,
             reply_markup=main_menu(),
         )
 
@@ -196,27 +211,85 @@ async def partner_looking(cb: CallbackQuery, state: FSMContext):
         await cb.answer()
         return
 
-    rid = await db.create_registration(
+    reg = await db.create_registration(
         tid=tid,
         player_user_id=cb.from_user.id,
         player_name=data.get("name") or _tg_name(cb.from_user),
         player_username=cb.from_user.username,
         looking=True,
     )
-    log.info("registration %s created (player=%s, looking)", rid, cb.from_user.id)
+    wl_note = _WAITLIST_NOTE if reg["waitlisted"] else ""
+    log.info("registration %s created (player=%s, looking, wl=%s)",
+             reg["id"], cb.from_user.id, reg["waitlisted"])
     await _finish(
         cb.message,
         state,
         "✅ Готово! Ты в списке со статусом <b>«ищет партнёра»</b> 🔍\n"
-        "Как только кто-то захочет в пару — пришлём тебе заявку на подтверждение.",
+        "Как только кто-то захочет в пару — пришлём тебе заявку на подтверждение." + wl_note,
     )
     await cb.answer()
 
 
-# ---------- cancel ----------
+# ---------- cancel wizard (отмена процесса записи) ----------
 
 @router.callback_query(F.data == "rn:cancel")
 async def reg_cancel_cb(cb: CallbackQuery, state: FSMContext):
     await state.clear()
     await cb.message.answer("Запись отменена.", reply_markup=main_menu())
     await cb.answer()
+
+
+# ---------- отмена существующей записи (§5.5–5.6) ----------
+
+async def _notify_promoted(bot: Bot, promoted: dict, title: str) -> None:
+    """Уведомляет поднятую из листа ожидания пару (игрока и партнёра)."""
+    text = (
+        f"🎉 Освободилось место — вас подняли из листа ожидания на "
+        f"<b>{title}</b>!\nСкоро пришлём реквизиты на оплату."
+    )
+    for uid in (promoted.get("player_user_id"), promoted.get("partner_user_id")):
+        if uid:
+            try:
+                await bot.send_message(uid, text)
+            except Exception as e:
+                log.info("Не уведомили поднятого %s: %s", uid, e)
+
+
+@router.callback_query(F.data.startswith("rcancel:"))
+async def cancel_existing_cb(cb: CallbackQuery, bot: Bot):
+    try:
+        rid = int(cb.data.split(":", 1)[1])
+    except ValueError:
+        await cb.answer()
+        return
+    reg = await db.get_registration(rid)
+    if not reg:
+        await cb.answer("Запись не найдена.", show_alert=True)
+        return
+
+    tid = reg["tournament_id"]
+    res = await db.cancel_my_registration(tid, cb.from_user.id)
+    if not res:
+        await cb.answer("Нечего отменять.", show_alert=True)
+        return
+
+    t = await db.get_tournament(tid)
+    title = esc(t["title"]) if t else "турнир"
+    await cb.message.edit_text(f"Запись на <b>{title}</b> отменена.")
+
+    other = res["other_user_id"]
+    if other:
+        try:
+            await bot.send_message(
+                other,
+                f"⚠️ Твой партнёр отменил участие в турнире <b>{title}</b>. "
+                "Вы больше не в паре. Что дальше?",
+                reply_markup=pair_declined_options(tid),
+            )
+        except Exception as e:
+            log.info("Не уведомили партнёра %s об отмене: %s", other, e)
+
+    if res["promoted"]:
+        await _notify_promoted(bot, res["promoted"], title)
+
+    await cb.answer("Отменено")
