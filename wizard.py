@@ -48,6 +48,21 @@ def _btn(text, data):
 #  Переходы между шагами (каждый go_* шлёт промпт и ставит состояние)
 # ============================================================
 
+async def _after_step(message: Message, state: FSMContext, default_next):
+    """В режиме редактирования возвращаемся в превью, иначе — на след. шаг."""
+    data = await state.get_data()
+    if data.get("edit_mode"):
+        await state.update_data(edit_mode=False)
+        await _go_preview(message, state)
+    else:
+        await default_next(message, state)
+
+
+async def _go_title(message: Message, state: FSMContext):
+    await state.set_state(NewTournament.title)
+    await message.answer("Название турнира:")
+
+
 async def _go_format(message: Message, state: FSMContext):
     formats = await db.list_formats()
     await state.update_data(fmt_opts=formats)
@@ -159,10 +174,66 @@ async def _go_preview(message: Message, state: FSMContext):
     t, loc = _preview_tournament(data)
     text = "👀 <b>Превью анонса:</b>\n\n" + render_tournament(t, loc, [], [])
     rows = [
-        [_btn("📤 Опубликовать сейчас", "tw:publish")],
+        [_btn("✏️ Изменить шаг", "twedit:menu")],
+        [_btn("🔄 Заполнить заново", "tw:restart")],
+        [_btn("📤 Опубликовать", "tw:pubmenu")],
         [_btn("❌ Отмена", "tw:cancel")],
     ]
     await message.answer(text, reply_markup=_kb(rows))
+
+
+# Шаги, доступные для редактирования: ключ → (подпись, go-функция)
+_EDIT_STEPS = [
+    ("title", "Название"),
+    ("format", "Формат"),
+    ("date", "Дата"),
+    ("time", "Время"),
+    ("location", "Локация"),
+    ("game_format", "Формат игры"),
+    ("levels", "Уровни"),
+    ("price", "Стоимость"),
+    ("max_pairs", "Макс. пар"),
+    ("extra", "Доп. текст"),
+]
+_EDIT_GO = {
+    "title": _go_title, "format": _go_format, "date": _go_date, "time": _go_time,
+    "location": _go_location, "game_format": _go_game_format, "levels": _go_levels,
+    "price": _go_currency, "max_pairs": _go_max_pairs, "extra": _go_extra,
+}
+
+
+@router.callback_query(F.data == "twedit:menu")
+async def edit_menu(cb: CallbackQuery, state: FSMContext):
+    rows = [[_btn(label, f"twedit:{key}")] for key, label in _EDIT_STEPS]
+    rows.append([_btn("⬅️ Назад к превью", "twedit:back")])
+    await cb.message.answer("Что изменить?", reply_markup=_kb(rows))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "twedit:back")
+async def edit_back(cb: CallbackQuery, state: FSMContext):
+    await _go_preview(cb.message, state)
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("twedit:"))
+async def edit_step(cb: CallbackQuery, state: FSMContext):
+    key = cb.data.split(":", 1)[1]
+    go = _EDIT_GO.get(key)
+    if not go:
+        await cb.answer()
+        return
+    await state.update_data(edit_mode=True)
+    await go(cb.message, state)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "tw:restart")
+async def restart(cb: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await state.set_state(NewTournament.title)
+    await cb.message.answer("🔄 Начинаем заново.\nНазвание турнира:")
+    await cb.answer()
 
 
 # ============================================================
@@ -199,7 +270,7 @@ async def st_title(message: Message, state: FSMContext):
         return
     await state.update_data(title=title)
     await state.set_state(None)
-    await _go_format(message, state)
+    await _after_step(message, state, _go_format)
 
 
 # ---------- format ----------
@@ -216,7 +287,7 @@ async def st_format(cb: CallbackQuery, state: FSMContext):
     opts = data.get("fmt_opts", [])
     fmt = opts[int(val)] if val.isdigit() and int(val) < len(opts) else None
     await state.update_data(format_type=fmt)
-    await _go_date(cb.message, state)
+    await _after_step(cb.message, state, _go_date)
     await cb.answer()
 
 
@@ -226,7 +297,7 @@ async def st_format_custom(message: Message, state: FSMContext):
     await db.add_format(fmt)
     await state.update_data(format_type=fmt)
     await state.set_state(None)
-    await _go_date(message, state)
+    await _after_step(message, state, _go_date)
 
 
 # ---------- date ----------
@@ -239,7 +310,7 @@ async def st_date(message: Message, state: FSMContext):
         await message.answer("Не понял дату. Формат ДД.ММ или ДД.ММ.ГГГГ:")
         return
     await state.update_data(date_iso=d.isoformat(), date_display=d.strftime("%d.%m"))
-    await _go_time(message, state)
+    await _after_step(message, state, _go_time)
 
 
 # ---------- time ----------
@@ -253,7 +324,7 @@ async def st_time(message: Message, state: FSMContext):
         return
     await state.update_data(time_start=ts, time_end=te)
     await state.set_state(None)
-    await _go_location(message, state)
+    await _after_step(message, state, _go_location)
 
 
 # ---------- location ----------
@@ -274,7 +345,7 @@ async def st_location(cb: CallbackQuery, state: FSMContext):
             location_id=loc["id"], location_title=loc["title"],
             location_url=loc.get("maps_url"),
         )
-    await _go_game_format(cb.message, state)
+    await _after_step(cb.message, state, _go_game_format)
     await cb.answer()
 
 
@@ -294,7 +365,7 @@ async def st_loc_url(message: Message, state: FSMContext):
     loc_id = await db.add_location(title, url)
     await state.update_data(location_id=loc_id, location_title=title, location_url=url)
     await state.set_state(None)
-    await _go_game_format(message, state)
+    await _after_step(message, state, _go_game_format)
 
 
 # ---------- game format ----------
@@ -303,7 +374,7 @@ async def st_loc_url(message: Message, state: FSMContext):
 async def st_game_format(message: Message, state: FSMContext):
     await state.update_data(game_format=message.text.strip()[:500])
     await state.set_state(None)
-    await _go_levels(message, state)
+    await _after_step(message, state, _go_levels)
 
 
 # ---------- levels (multiselect) ----------
@@ -323,7 +394,7 @@ async def st_levels(cb: CallbackQuery, state: FSMContext):
         if not sel:
             await cb.answer("Отметь хотя бы один уровень.", show_alert=True)
             return
-        await _go_currency(cb.message, state)
+        await _after_step(cb.message, state, _go_currency)
         await cb.answer()
         return
 
@@ -374,7 +445,7 @@ async def st_price(message: Message, state: FSMContext):
         return
     await state.update_data(price_amount=float(raw))
     await state.set_state(None)
-    await _go_max_pairs(message, state)
+    await _after_step(message, state, _go_max_pairs)
 
 
 # ---------- max pairs ----------
@@ -382,7 +453,7 @@ async def st_price(message: Message, state: FSMContext):
 @router.callback_query(F.data == "twmp:none")
 async def st_max_none(cb: CallbackQuery, state: FSMContext):
     await state.update_data(max_pairs=None)
-    await _go_extra(cb.message, state)
+    await _after_step(cb.message, state, _go_extra)
     await cb.answer()
 
 
@@ -394,7 +465,7 @@ async def st_max_pairs(message: Message, state: FSMContext):
         return
     await state.update_data(max_pairs=int(raw))
     await state.set_state(None)
-    await _go_extra(message, state)
+    await _after_step(message, state, _go_extra)
 
 
 # ---------- extra ----------
@@ -402,7 +473,7 @@ async def st_max_pairs(message: Message, state: FSMContext):
 @router.callback_query(F.data == "twe:skip")
 async def st_extra_skip(cb: CallbackQuery, state: FSMContext):
     await state.update_data(extra_note=None)
-    await _go_preview(cb.message, state)
+    await _after_step(cb.message, state, _go_preview)
     await cb.answer()
 
 
@@ -410,7 +481,7 @@ async def st_extra_skip(cb: CallbackQuery, state: FSMContext):
 async def st_extra(message: Message, state: FSMContext):
     await state.update_data(extra_note=message.text.strip()[:500])
     await state.set_state(None)
-    await _go_preview(message, state)
+    await _after_step(message, state, _go_preview)
 
 
 # ---------- publish ----------
@@ -422,17 +493,11 @@ async def st_cancel(cb: CallbackQuery, state: FSMContext):
     await cb.answer()
 
 
-@router.callback_query(F.data == "tw:publish")
-async def st_publish(cb: CallbackQuery, state: FSMContext, bot: Bot):
-    if not _is_admin(cb.from_user.id):
-        await cb.answer("Только для администратора.", show_alert=True)
-        return
-    data = await state.get_data()
+async def _insert_from_data(data: dict, publish_at_iso: str | None, status: str) -> str:
     tid = uuid.uuid4().hex[:10]
     d = _date.fromisoformat(data["date_iso"])
     start_at = make_start_at(d, data.get("time_start"))
     deadline = payment_deadline(start_at)
-
     await db.insert_tournament({
         "id": tid,
         "title": data.get("title"),
@@ -449,11 +514,34 @@ async def st_publish(cb: CallbackQuery, state: FSMContext, bot: Bot):
         "extra_note": data.get("extra_note"),
         "start_at": to_iso(start_at),
         "payment_deadline": to_iso(deadline),
-        "publish_at": None,
-        "status_v2": "published",
+        "publish_at": publish_at_iso,
+        "status_v2": status,
     })
-    await state.clear()
+    return tid
 
+
+@router.callback_query(F.data == "tw:pubmenu")
+async def pub_menu(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    rows = [
+        [_btn("📤 Опубликовать сейчас", "tw:pubnow")],
+        [_btn("🕐 Запланировать", "tw:pubsched")],
+        [_btn("⬅️ Назад к превью", "twedit:back")],
+    ]
+    await cb.message.answer("Когда публиковать анонс?", reply_markup=_kb(rows))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "tw:pubnow")
+async def pub_now(cb: CallbackQuery, state: FSMContext, bot: Bot):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    data = await state.get_data()
+    tid = await _insert_from_data(data, None, "published")
+    await state.clear()
     if GROUP_CHAT_ID:
         await refresh_announcement(bot, tid)
         await cb.message.answer("✅ Турнир создан и анонс опубликован в группе!")
@@ -462,4 +550,42 @@ async def st_publish(cb: CallbackQuery, state: FSMContext, bot: Bot):
             "✅ Турнир создан. GROUP_CHAT_ID не задан — анонс в группу не отправлен."
         )
     await cb.answer()
-    log.info("tournament %s created by admin %s", tid, cb.from_user.id)
+    log.info("tournament %s published by admin %s", tid, cb.from_user.id)
+
+
+@router.callback_query(F.data == "tw:pubsched")
+async def pub_sched(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    await state.set_state(NewTournament.schedule_at)
+    await cb.message.answer(
+        "🕐 Когда опубликовать? Пришли дату и время (по Бали), например "
+        "<code>20.06 09:00</code>:"
+    )
+    await cb.answer()
+
+
+@router.message(NewTournament.schedule_at, F.text)
+async def st_schedule(message: Message, state: FSMContext):
+    from timeutils import WITA, now_wita, parse_date, parse_time
+    from datetime import datetime
+    parts = message.text.strip().split()
+    d = parse_date(parts[0]) if parts else None
+    tm = parse_time(parts[1]) if len(parts) > 1 else None
+    if not d or not tm:
+        await message.answer("Не понял. Формат: <code>20.06 09:00</code>:")
+        return
+    when = datetime.combine(d, tm, tzinfo=WITA)
+    if when <= now_wita():
+        await message.answer("Это время уже прошло. Укажи будущие дату и время:")
+        return
+    data = await state.get_data()
+    tid = await _insert_from_data(data, to_iso(when), "scheduled")
+    await state.clear()
+    await message.answer(
+        f"✅ Турнир создан. Анонс выйдет автоматически "
+        f"<b>{when.strftime('%d.%m в %H:%M')}</b> (Бали).\n"
+        "<i>Авто-публикация по расписанию заработает после Этапа 3 (планировщик).</i>"
+    )
+    log.info("tournament %s scheduled for %s by admin %s", tid, to_iso(when), message.from_user.id)

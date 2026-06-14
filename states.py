@@ -26,3 +26,4 @@ class NewTournament(StatesGroup):
     price = State()
     max_pairs = State()
     extra = State()
+    schedule_at = State()

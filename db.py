@@ -1158,7 +1158,8 @@ async def list_active_tournaments() -> list[dict]:
         conn.row_factory = aiosqlite.Row
         cur = await conn.execute(
             "SELECT * FROM tournaments WHERE is_active=1 "
-            "ORDER BY COALESCE(date,''), COALESCE(time,'')"
+            "AND (status_v2 IS NULL OR status_v2 NOT IN ('scheduled','finished','cancelled')) "
+            "ORDER BY COALESCE(start_at, date, ''), COALESCE(time_start, time, '')"
         )
         return [dict(r) for r in await cur.fetchall()]
 
