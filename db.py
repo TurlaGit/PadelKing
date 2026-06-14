@@ -4,6 +4,8 @@ import aiosqlite
 
 from config import DB_PATH
 
+# Legacy-схема (Этап 0). Будет удалена на шаге 1.5, когда `participants`
+# заменим на пары. Пока живёт параллельно с новыми таблицами этапа 1.
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS tournaments (
     id TEXT PRIMARY KEY,
@@ -36,14 +38,309 @@ CREATE INDEX IF NOT EXISTS ix_participants_tournament_status
     ON participants(tournament_id, status, id);
 """
 
+# --- Этап 1: новая модель (пары, оплаты по игроку, заявки, локации, кеш юзеров) ---
+SCHEMA_V2 = """
+CREATE TABLE IF NOT EXISTS known_users (
+    user_id          INTEGER PRIMARY KEY,
+    username         TEXT,
+    username_lower   TEXT,
+    first_name       TEXT,
+    last_name        TEXT,
+    is_blocked       INTEGER NOT NULL DEFAULT 0,
+    first_seen_at    TEXT NOT NULL,
+    last_seen_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_known_users_username_lower
+    ON known_users(username_lower);
+
+CREATE TABLE IF NOT EXISTS locations (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    title     TEXT NOT NULL UNIQUE,
+    maps_url  TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dict_levels (
+    value TEXT PRIMARY KEY,
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS dict_formats (
+    value TEXT PRIMARY KEY,
+    is_builtin INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL
+);
+
+-- Регистрация = ПАРА. partner_user_id NULL пока партнёр не привязан
+-- (ищет / ждёт подтверждения / введён только ник).
+CREATE TABLE IF NOT EXISTS registrations (
+    id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+    tournament_id            TEXT NOT NULL,
+    player_user_id           INTEGER NOT NULL,
+    player_name              TEXT,
+    player_username          TEXT,
+    partner_user_id          INTEGER,
+    partner_name             TEXT,
+    partner_username         TEXT,
+    is_looking_for_partner   INTEGER NOT NULL DEFAULT 0,
+    -- looking | pending_confirm | active | waitlist | cancelled | removed_unpaid
+    status                   TEXT NOT NULL DEFAULT 'pending_confirm',
+    slot_index               INTEGER,
+    created_at               TEXT NOT NULL,
+    updated_at               TEXT NOT NULL,
+    FOREIGN KEY (tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_registrations_tournament_status
+    ON registrations(tournament_id, status);
+CREATE INDEX IF NOT EXISTS ix_registrations_player
+    ON registrations(player_user_id);
+CREATE INDEX IF NOT EXISTS ix_registrations_partner
+    ON registrations(partner_user_id);
+
+-- Платёж по КАЖДОМУ игроку пары (player/partner). Если pays_for='both' —
+-- партнёрская строка автоматически закрывается тем же платежом при approve.
+CREATE TABLE IF NOT EXISTS payments (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    registration_id     INTEGER NOT NULL,
+    who                 TEXT NOT NULL,   -- 'player' | 'partner'
+    user_id             INTEGER,
+    -- unpaid | pending_review | paid | paid_manual | rejected
+    status              TEXT NOT NULL DEFAULT 'unpaid',
+    pays_for            TEXT NOT NULL DEFAULT 'self', -- 'self' | 'both'
+    screenshot_file_id  TEXT,
+    reviewed_by         INTEGER,
+    reviewed_at         TEXT,
+    reminder_stage      INTEGER NOT NULL DEFAULT 0,
+    last_reminder_at    TEXT,
+    created_at          TEXT NOT NULL,
+    updated_at          TEXT NOT NULL,
+    FOREIGN KEY (registration_id) REFERENCES registrations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_payments_registration
+    ON payments(registration_id);
+CREATE INDEX IF NOT EXISTS ix_payments_status
+    ON payments(status);
+
+-- Заявка «✋ Хочу в пару» к одиночке (registrations с is_looking_for_partner=1).
+CREATE TABLE IF NOT EXISTS pair_requests (
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    tournament_id       TEXT NOT NULL,
+    to_registration_id  INTEGER NOT NULL,
+    from_user_id        INTEGER NOT NULL,
+    from_name           TEXT,
+    from_username       TEXT,
+    -- pending | accepted | declined | expired | cancelled
+    status              TEXT NOT NULL DEFAULT 'pending',
+    created_at          TEXT NOT NULL,
+    expires_at          TEXT,
+    resolved_at         TEXT,
+    FOREIGN KEY (tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE,
+    FOREIGN KEY (to_registration_id) REFERENCES registrations(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS ix_pair_requests_target_status
+    ON pair_requests(to_registration_id, status);
+CREATE INDEX IF NOT EXISTS ix_pair_requests_from_status
+    ON pair_requests(from_user_id, status);
+"""
+
+# Колонки, которые добавляем к существующей tournaments через ALTER TABLE.
+# SQLite не умеет IF NOT EXISTS у ADD COLUMN — проверяем сами.
+_TOURNAMENT_NEW_COLUMNS: list[tuple[str, str]] = [
+    ("format_type",      "TEXT"),
+    ("time_start",       "TEXT"),
+    ("time_end",         "TEXT"),
+    ("location_id",      "INTEGER"),
+    ("game_format",      "TEXT"),
+    ("levels",           "TEXT"),    # JSON-массив
+    ("currency",         "TEXT"),    # IDR | USD | RUB
+    ("price_amount",     "REAL"),
+    ("max_pairs",        "INTEGER"),
+    ("extra_note",       "TEXT"),
+    ("start_at",         "TEXT"),    # ISO datetime в WITA
+    ("payment_deadline", "TEXT"),    # ISO datetime в WITA
+    ("publish_at",       "TEXT"),    # NULL = сразу
+    ("pinned",           "INTEGER NOT NULL DEFAULT 0"),
+    # draft | scheduled | published | finished | cancelled
+    ("status_v2",        "TEXT"),
+]
+
+_BUILTIN_LEVELS = [
+    "Beginner",
+    "Low Bronze", "Mid Bronze", "High Bronze",
+    "Low Silver", "Mid Silver", "High Silver",
+    "Low Gold",   "Mid Gold",   "High Gold",
+]
+_BUILTIN_FORMATS = [
+    "Americana", "Mexicano", "King of the Court", "Mixed", "Stars",
+]
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+async def _existing_columns(conn, table: str) -> set[str]:
+    cur = await conn.execute(f"PRAGMA table_info({table})")
+    return {row[1] for row in await cur.fetchall()}
+
+
+async def _migrate_tournaments(conn) -> None:
+    existing = await _existing_columns(conn, "tournaments")
+    for name, decl in _TOURNAMENT_NEW_COLUMNS:
+        if name not in existing:
+            await conn.execute(f"ALTER TABLE tournaments ADD COLUMN {name} {decl}")
+
+
+async def _seed_dictionaries(conn) -> None:
+    now = _now()
+    for v in _BUILTIN_LEVELS:
+        await conn.execute(
+            "INSERT OR IGNORE INTO dict_levels(value, is_builtin, created_at) "
+            "VALUES (?, 1, ?)",
+            (v, now),
+        )
+    for v in _BUILTIN_FORMATS:
+        await conn.execute(
+            "INSERT OR IGNORE INTO dict_formats(value, is_builtin, created_at) "
+            "VALUES (?, 1, ?)",
+            (v, now),
+        )
+
+
 async def init_db() -> None:
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.executescript(SCHEMA)
+        await conn.executescript(SCHEMA_V2)
+        await _migrate_tournaments(conn)
+        await _seed_dictionaries(conn)
+        await conn.commit()
+
+
+# ============================================================
+#  known_users — кеш всех, кто хоть раз контактировал с ботом.
+#  Нужен §5.3 (резолв @ника → user_id) и пометке is_blocked.
+# ============================================================
+
+async def upsert_known_user(
+    user_id: int,
+    username: str | None,
+    first_name: str | None,
+    last_name: str | None,
+) -> None:
+    now = _now()
+    uname_lower = username.lower() if username else None
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            """
+            INSERT INTO known_users
+                (user_id, username, username_lower, first_name, last_name,
+                 first_seen_at, last_seen_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                username       = excluded.username,
+                username_lower = excluded.username_lower,
+                first_name     = excluded.first_name,
+                last_name      = excluded.last_name,
+                last_seen_at   = excluded.last_seen_at,
+                -- если человек снова зашёл, снимаем флаг блокировки
+                is_blocked     = 0
+            """,
+            (user_id, username, uname_lower, first_name, last_name, now, now),
+        )
+        await conn.commit()
+
+
+async def find_user_by_username(username: str) -> dict | None:
+    if not username:
+        return None
+    uname = username.lstrip("@").strip().lower()
+    if not uname:
+        return None
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM known_users WHERE username_lower=?",
+            (uname,),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def mark_user_blocked(user_id: int, blocked: bool = True) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE known_users SET is_blocked=? WHERE user_id=?",
+            (1 if blocked else 0, user_id),
+        )
+        await conn.commit()
+
+
+# ============================================================
+#  locations / dict_levels / dict_formats — справочники для админки
+# ============================================================
+
+async def list_locations() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("SELECT * FROM locations ORDER BY title")
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def add_location(title: str, maps_url: str | None) -> int:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "INSERT INTO locations(title, maps_url, created_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(title) DO UPDATE SET maps_url=excluded.maps_url "
+            "RETURNING id",
+            (title.strip(), (maps_url or "").strip() or None, _now()),
+        )
+        row = await cur.fetchone()
+        await conn.commit()
+        return int(row[0])
+
+
+async def get_location(loc_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("SELECT * FROM locations WHERE id=?", (loc_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def list_levels() -> list[str]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "SELECT value FROM dict_levels ORDER BY is_builtin DESC, created_at ASC"
+        )
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def add_level(value: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT OR IGNORE INTO dict_levels(value, is_builtin, created_at) "
+            "VALUES (?, 0, ?)",
+            (value.strip(), _now()),
+        )
+        await conn.commit()
+
+
+async def list_formats() -> list[str]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "SELECT value FROM dict_formats ORDER BY is_builtin DESC, created_at ASC"
+        )
+        return [r[0] for r in await cur.fetchall()]
+
+
+async def add_format(value: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "INSERT OR IGNORE INTO dict_formats(value, is_builtin, created_at) "
+            "VALUES (?, 0, ?)",
+            (value.strip(), _now()),
+        )
         await conn.commit()
 
 

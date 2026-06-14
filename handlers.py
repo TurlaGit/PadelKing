@@ -1,9 +1,9 @@
 import logging
 
-from aiogram import Bot, F, Router
+from aiogram import BaseMiddleware, Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart, CommandObject
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message, TelegramObject, User
 
 import db
 from announcement import update_announcement
@@ -14,6 +14,29 @@ from keyboards import back_to_menu, main_menu, tournament_card, tournaments_list
 
 log = logging.getLogger(__name__)
 router = Router()
+
+
+class KnownUsersMiddleware(BaseMiddleware):
+    """На каждом апдейте кладёт пользователя в known_users —
+    чтобы потом резолвить @ник → user_id (§5.3)."""
+
+    async def __call__(self, handler, event: TelegramObject, data: dict):
+        user: User | None = data.get("event_from_user")
+        if user is not None and not user.is_bot:
+            try:
+                await db.upsert_known_user(
+                    user_id=user.id,
+                    username=user.username,
+                    first_name=user.first_name,
+                    last_name=user.last_name,
+                )
+            except Exception as e:
+                log.warning("upsert_known_user failed: %s", e)
+        return await handler(event, data)
+
+
+router.message.middleware(KnownUsersMiddleware())
+router.callback_query.middleware(KnownUsersMiddleware())
 
 
 def _texts() -> dict:
