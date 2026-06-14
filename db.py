@@ -481,6 +481,202 @@ async def set_registration_status(rid: int, status: str) -> None:
         await conn.commit()
 
 
+async def list_singles(tid: str, exclude_user_id: int | None = None) -> list[dict]:
+    """Записи со слотом «ищет партнёра» (status='looking')."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM registrations "
+            "WHERE tournament_id=? AND status='looking' "
+            "  AND (? IS NULL OR player_user_id<>?) "
+            "ORDER BY id ASC",
+            (tid, exclude_user_id, exclude_user_id),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+# ============================================================
+#  pair_requests — заявки «✋ Хочу в пару» к одиночкам (Этап 1.4)
+# ============================================================
+
+async def create_pair_request(
+    tid: str,
+    to_registration_id: int,
+    from_user_id: int,
+    from_name: str | None,
+    from_username: str | None,
+    expires_at: str | None,
+) -> dict:
+    """Создаёт заявку Б → одиночке А.
+    Возвращает {'status': 'ok'|'exists'|'taken'|'self'|'busy', 'request_id'?}.
+    """
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await conn.execute(
+                "SELECT * FROM registrations WHERE id=?", (to_registration_id,)
+            )
+            reg = await cur.fetchone()
+            if not reg or reg["status"] != "looking":
+                await conn.rollback()
+                return {"status": "taken"}
+            if from_user_id == reg["player_user_id"]:
+                await conn.rollback()
+                return {"status": "self"}
+
+            placeholders = ",".join("?" * len(ACTIVE_REG_STATUSES))
+            cur = await conn.execute(
+                f"""
+                SELECT id FROM registrations
+                WHERE tournament_id=? AND status IN ({placeholders})
+                  AND (player_user_id=? OR partner_user_id=?)
+                LIMIT 1
+                """,
+                (tid, *ACTIVE_REG_STATUSES, from_user_id, from_user_id),
+            )
+            if await cur.fetchone():
+                await conn.rollback()
+                return {"status": "busy"}
+
+            cur = await conn.execute(
+                "SELECT id FROM pair_requests "
+                "WHERE to_registration_id=? AND from_user_id=? AND status='pending'",
+                (to_registration_id, from_user_id),
+            )
+            dup = await cur.fetchone()
+            if dup:
+                await conn.rollback()
+                return {"status": "exists", "request_id": dup["id"]}
+
+            cur = await conn.execute(
+                """
+                INSERT INTO pair_requests
+                    (tournament_id, to_registration_id, from_user_id,
+                     from_name, from_username, status, created_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                RETURNING id
+                """,
+                (tid, to_registration_id, from_user_id, from_name,
+                 from_username, _now(), expires_at),
+            )
+            req_id = (await cur.fetchone())[0]
+            await conn.commit()
+            return {"status": "ok", "request_id": int(req_id)}
+        except Exception:
+            await conn.rollback()
+            raise
+
+
+async def get_pair_request(req_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("SELECT * FROM pair_requests WHERE id=?", (req_id,))
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def accept_pair_request(req_id: int) -> dict:
+    """А принимает заявку Б. Атомарно: привязывает Б партнёром, закрывает
+    остальные заявки к А (с возвратом их авторов для уведомления) и
+    исходящие заявки Б к другим. Партнёр берётся из самой заявки.
+    Возвращает {'status': 'ok'|'stale'|'taken'|'partner_busy', ...}.
+    """
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        await conn.execute("BEGIN IMMEDIATE")
+        try:
+            cur = await conn.execute("SELECT * FROM pair_requests WHERE id=?", (req_id,))
+            req = await cur.fetchone()
+            if not req or req["status"] != "pending":
+                await conn.rollback()
+                return {"status": "stale"}
+
+            cur = await conn.execute(
+                "SELECT * FROM registrations WHERE id=?", (req["to_registration_id"],)
+            )
+            reg = await cur.fetchone()
+            if not reg or reg["status"] != "looking":
+                await conn.rollback()
+                return {"status": "taken"}
+
+            partner_id = req["from_user_id"]
+            placeholders = ",".join("?" * len(ACTIVE_REG_STATUSES))
+            cur = await conn.execute(
+                f"""
+                SELECT id FROM registrations
+                WHERE tournament_id=? AND id<>?
+                  AND status IN ({placeholders})
+                  AND (player_user_id=? OR partner_user_id=?)
+                LIMIT 1
+                """,
+                (reg["tournament_id"], reg["id"], *ACTIVE_REG_STATUSES,
+                 partner_id, partner_id),
+            )
+            if await cur.fetchone():
+                await conn.rollback()
+                return {"status": "partner_busy"}
+
+            now = _now()
+            await conn.execute(
+                "UPDATE registrations SET partner_user_id=?, partner_name=?, "
+                "partner_username=?, is_looking_for_partner=0, status='active', "
+                "updated_at=? WHERE id=?",
+                (partner_id, req["from_name"], req["from_username"], now, reg["id"]),
+            )
+            await conn.execute(
+                "UPDATE pair_requests SET status='accepted', resolved_at=? WHERE id=?",
+                (now, req_id),
+            )
+
+            # остальные заявки к этому одиночке → отклоняем, авторов уведомим
+            cur = await conn.execute(
+                "SELECT from_user_id FROM pair_requests "
+                "WHERE to_registration_id=? AND status='pending' AND id<>?",
+                (reg["id"], req_id),
+            )
+            notify_rejected = [r["from_user_id"] for r in await cur.fetchall()]
+            await conn.execute(
+                "UPDATE pair_requests SET status='cancelled', resolved_at=? "
+                "WHERE to_registration_id=? AND status='pending' AND id<>?",
+                (now, reg["id"], req_id),
+            )
+            # исходящие заявки нового партнёра к другим — тихо закрываем
+            await conn.execute(
+                "UPDATE pair_requests SET status='cancelled', resolved_at=? "
+                "WHERE from_user_id=? AND status='pending'",
+                (now, partner_id),
+            )
+            await conn.commit()
+            return {
+                "status": "ok",
+                "registration_id": reg["id"],
+                "player_user_id": reg["player_user_id"],
+                "partner_user_id": partner_id,
+                "notify_rejected": notify_rejected,
+            }
+        except Exception:
+            await conn.rollback()
+            raise
+
+
+async def decline_pair_request(req_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM pair_requests WHERE id=? AND status='pending'", (req_id,)
+        )
+        req = await cur.fetchone()
+        if not req:
+            return None
+        await conn.execute(
+            "UPDATE pair_requests SET status='declined', resolved_at=? WHERE id=?",
+            (_now(), req_id),
+        )
+        await conn.commit()
+        return dict(req)
+
+
 async def get_registrations(tid: str, statuses: tuple[str, ...] | None = None) -> list[dict]:
     statuses = statuses or ACTIVE_REG_STATUSES
     placeholders = ",".join("?" * len(statuses))

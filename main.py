@@ -8,6 +8,7 @@ from aiogram.enums import ParseMode
 import config
 import db
 import handlers
+import matchmaking
 import partners
 import registration
 from content import load_content
@@ -65,6 +66,7 @@ async def main() -> None:
     dp.message.middleware(handlers.KnownUsersMiddleware())
     dp.callback_query.middleware(handlers.KnownUsersMiddleware())
     dp.include_router(partners.router)
+    dp.include_router(matchmaking.router)
     dp.include_router(registration.router)
     dp.include_router(handlers.router)
 

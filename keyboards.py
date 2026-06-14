@@ -89,6 +89,44 @@ def partner_confirm(rid: int) -> InlineKeyboardMarkup:
     )
 
 
+def pair_request_decision(req_id: int) -> InlineKeyboardMarkup:
+    """Кнопки одиночке А: принять/отклонить заявку Б."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Принять", callback_data=f"preq:{req_id}:yes"),
+                InlineKeyboardButton(text="❌ Отклонить", callback_data=f"preq:{req_id}:no"),
+            ],
+        ]
+    )
+
+
+def pair_declined_options(tid: str) -> InlineKeyboardMarkup:
+    """Что предложить Б после отказа А."""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="🔄 Записаться на турнир", callback_data=f"reg:{tid}")],
+            [InlineKeyboardButton(text="🤝 Выбрать из тех, кто ищет пару", callback_data=f"singles:{tid}")],
+            [InlineKeyboardButton(text="🏠 В меню", callback_data="menu")],
+        ]
+    )
+
+
+def singles_list(tid: str, singles: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for s in singles:
+        name = s.get("player_name") or "Игрок"
+        uname = f" @{s['player_username']}" if s.get("player_username") else ""
+        rows.append([
+            InlineKeyboardButton(
+                text=f"✋ {name}{uname}"[:60],
+                callback_data=f"pair:{s['id']}",
+            )
+        ])
+    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def announce_button(tid: str, label: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
