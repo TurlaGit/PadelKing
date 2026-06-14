@@ -20,6 +20,7 @@ from announcement import refresh_announcement
 from config import BOT_USERNAME
 from formatting import esc
 from keyboards import main_menu, partner_confirm
+from payments import send_requisites_to_pair
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -90,6 +91,7 @@ async def _do_confirm(bot: Bot, rid: int, confirmer) -> str:
         return status
     reg = await db.get_registration(rid)
     await refresh_announcement(bot, reg["tournament_id"])
+    await send_requisites_to_pair(bot, rid)
     t = await db.get_tournament(reg["tournament_id"])
     title = esc(t["title"]) if t else "турнир"
     # Уведомляем игрока А

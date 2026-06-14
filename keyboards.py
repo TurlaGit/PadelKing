@@ -77,6 +77,18 @@ def reg_cancel() -> InlineKeyboardMarkup:
     )
 
 
+def pay_choice(rid: int, pays_for: str = "self") -> InlineKeyboardMarkup:
+    """Выбор «за себя / за обоих». Текущий выбор помечается галочкой."""
+    self_mark = "✅ " if pays_for == "self" else ""
+    both_mark = "✅ " if pays_for == "both" else ""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text=f"{self_mark}🙋 Оплачу за себя", callback_data=f"pay:self:{rid}")],
+            [InlineKeyboardButton(text=f"{both_mark}👥 Оплачу за обоих", callback_data=f"pay:both:{rid}")],
+        ]
+    )
+
+
 def partner_confirm(rid: int) -> InlineKeyboardMarkup:
     """Кнопки в DM партнёру: подтвердить / отказаться от участия в паре."""
     return InlineKeyboardMarkup(

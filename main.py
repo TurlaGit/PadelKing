@@ -10,6 +10,7 @@ import db
 import handlers
 import matchmaking
 import partners
+import payments
 import registration
 from content import load_content
 
@@ -67,6 +68,7 @@ async def main() -> None:
     dp.callback_query.middleware(handlers.KnownUsersMiddleware())
     dp.include_router(partners.router)
     dp.include_router(matchmaking.router)
+    dp.include_router(payments.router)
     dp.include_router(registration.router)
     dp.include_router(handlers.router)
 

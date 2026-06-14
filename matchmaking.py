@@ -20,6 +20,7 @@ from aiogram.types import CallbackQuery, Message
 import db
 from announcement import refresh_announcement
 from formatting import esc
+from payments import send_requisites_to_pair
 from keyboards import (
     main_menu,
     pair_declined_options,
@@ -180,6 +181,7 @@ async def pair_request_decision_cb(cb: CallbackQuery, bot: Bot):
             return
 
         await refresh_announcement(bot, req["tournament_id"])
+        await send_requisites_to_pair(bot, res["registration_id"])
         await cb.message.edit_text(
             f"✅ Готово! Вы в паре с <b>{bname}</b>{_at(req.get('from_username'))} "
             f"на <b>{title}</b>.\nСкоро пришлём реквизиты на оплату."

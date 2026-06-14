@@ -705,6 +705,69 @@ async def accept_pair_request(req_id: int) -> dict:
             raise
 
 
+# ============================================================
+#  payments — оплата по каждому игроку пары (Этап 2)
+# ============================================================
+
+async def ensure_pair_payments(rid: int) -> list[dict]:
+    """Создаёт платёжные строки для обоих игроков пары (если ещё нет).
+    Возвращает [{who, user_id, ...}, ...]. Если пара неполная — []."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute("SELECT * FROM registrations WHERE id=?", (rid,))
+        reg = await cur.fetchone()
+        if not reg or not reg["player_user_id"] or not reg["partner_user_id"]:
+            return []
+        members = [("player", reg["player_user_id"]), ("partner", reg["partner_user_id"])]
+        now = _now()
+        for who, uid in members:
+            cur = await conn.execute(
+                "SELECT id FROM payments WHERE registration_id=? AND who=?", (rid, who)
+            )
+            if not await cur.fetchone():
+                await conn.execute(
+                    "INSERT INTO payments (registration_id, who, user_id, status, "
+                    "pays_for, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 'unpaid', 'self', ?, ?)",
+                    (rid, who, uid, now, now),
+                )
+        await conn.commit()
+        cur = await conn.execute(
+            "SELECT * FROM payments WHERE registration_id=? ORDER BY id", (rid,)
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_pair_payments(rid: int) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM payments WHERE registration_id=? ORDER BY id", (rid,)
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def get_payment_for_user(rid: int, user_id: int) -> dict | None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM payments WHERE registration_id=? AND user_id=?",
+            (rid, user_id),
+        )
+        row = await cur.fetchone()
+        return dict(row) if row else None
+
+
+async def set_payment_pays_for(rid: int, user_id: int, pays_for: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE payments SET pays_for=?, updated_at=? "
+            "WHERE registration_id=? AND user_id=?",
+            (pays_for, _now(), rid, user_id),
+        )
+        await conn.commit()
+
+
 async def get_main_registrations(tid: str) -> list[dict]:
     """Пары основного состава (не в листе ожидания)."""
     placeholders = ",".join("?" * len(SLOT_STATUSES))
