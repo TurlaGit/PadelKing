@@ -17,11 +17,9 @@ services:
         value: PadelFirst_bot
       - key: ADMIN_CHAT_ID
         value: "212659753"
+      - key: ADMIN_IDS
+        sync: false
       - key: GROUP_CHAT_ID
-        sync: false
-      - key: GOOGLE_SHEET_ID
-        sync: false
-      - key: GOOGLE_CREDENTIALS_JSON
         sync: false
       - key: DB_PATH
         value: /var/data/padel.db

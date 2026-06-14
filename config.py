@@ -22,9 +22,10 @@ GROUP_CHAT_ID = _int_or_none("GROUP_CHAT_ID")
 
 DB_PATH = os.getenv("DB_PATH", "padel.db")
 
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
-GOOGLE_CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH", "credentials.json")
-GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON", "").strip()
+# Список Telegram user_id, кому доступна админка (Яна и др.). Через запятую.
+ADMIN_IDS = [
+    int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",") if x
+] or [ADMIN_CHAT_ID]
 
 PORT = _int_or_none("PORT")
 

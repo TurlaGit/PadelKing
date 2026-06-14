@@ -11,7 +11,6 @@ from config import ADMIN_CHAT_ID
 from content import load_content
 from formatting import esc, format_tournament, render_payment
 from keyboards import back_to_menu, main_menu, tournament_card, tournaments_list
-from sheets import append_registration
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -174,9 +173,6 @@ async def cb_join(cb: CallbackQuery, bot: Bot):
     except Exception as e:
         log.info("Не смогли уведомить админа: %s", e)
 
-    # Google Sheets
-    await append_registration(tid, t["title"], user.id, user.username or "", full_name, status)
-
     await cb.answer(texts["joined"] if status == "active" else texts["waitlist"])
 
 
@@ -210,12 +206,6 @@ async def cb_cancel(cb: CallbackQuery, bot: Bot):
             await bot.send_message(promoted["user_id"], text)
         except Exception as e:
             log.info("Не смогли уведомить promoted-пользователя: %s", e)
-        await append_registration(
-            tid, t["title"], promoted["user_id"],
-            promoted.get("username") or "",
-            promoted.get("full_name") or "",
-            "promoted_to_active",
-        )
 
     try:
         await bot.send_message(
@@ -228,7 +218,4 @@ async def cb_cancel(cb: CallbackQuery, bot: Bot):
     except Exception as e:
         log.info("Не смогли уведомить админа об отмене: %s", e)
 
-    await append_registration(
-        tid, t["title"], user.id, user.username or "", _full_name(user), "cancelled"
-    )
     await cb.answer(texts["cancelled"])
