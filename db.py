@@ -1251,6 +1251,58 @@ async def tournament_financials(tid: str) -> dict:
         }
 
 
+# ============================================================
+#  Планировщик (Этап 3) — все сравнения по ISO-строкам WITA (+08:00)
+# ============================================================
+
+async def list_due_scheduled(now_iso: str) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM tournaments WHERE is_active=1 AND status_v2='scheduled' "
+            "AND publish_at IS NOT NULL AND publish_at<=?",
+            (now_iso,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def list_published_with_announce() -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM tournaments WHERE is_active=1 AND status_v2='published' "
+            "AND announce_message_id IS NOT NULL"
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def list_finished_due(grace_iso: str) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            "SELECT * FROM tournaments WHERE is_active=1 AND status_v2='published' "
+            "AND start_at IS NOT NULL AND start_at<?",
+            (grace_iso,),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def set_pinned(tid: str, pinned: bool) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE tournaments SET pinned=? WHERE id=?", (1 if pinned else 0, tid)
+        )
+        await conn.commit()
+
+
+async def set_tournament_status_v2(tid: str, status: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE tournaments SET status_v2=? WHERE id=?", (status, tid)
+        )
+        await conn.commit()
+
+
 async def set_announce_message(tid: str, chat_id: int, message_id: int) -> None:
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(

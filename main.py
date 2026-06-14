@@ -13,6 +13,7 @@ import matchmaking
 import partners
 import payments
 import registration
+import scheduler
 import wizard
 from content import load_content
 
@@ -78,8 +79,13 @@ async def main() -> None:
 
     await _maybe_start_health_server()
     await bot.delete_webhook(drop_pending_updates=True)
+
+    scheduler_task = asyncio.create_task(scheduler.run_scheduler(bot))
     log.info("Бот запущен, polling…")
-    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    try:
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+    finally:
+        scheduler_task.cancel()
 
 
 if __name__ == "__main__":
