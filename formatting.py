@@ -142,6 +142,20 @@ def tournament_header(t: dict, location: dict | None = None) -> str:
     return "\n".join(lines)
 
 
+# Сколько пар максимум показываем в блоке (защита от лимита 4096 Telegram).
+_MAX_SHOWN = 30
+
+
+def _list_block(regs: list[dict]) -> list[str]:
+    lines = []
+    for i, r in enumerate(regs[:_MAX_SHOWN], 1):
+        lines.append(f"{i}. {reg_line(r)}")
+    extra = len(regs) - _MAX_SHOWN
+    if extra > 0:
+        lines.append(f"<i>…и ещё {extra}</i>")
+    return lines
+
+
 def render_tournament(
     t: dict,
     location: dict | None,
@@ -154,15 +168,13 @@ def render_tournament(
     cap_str = f"/{cap}" if cap else ""
     lines.append(f"<b>Участники ({len(main_regs)}{cap_str} пар):</b>")
     if main_regs:
-        for i, r in enumerate(main_regs, 1):
-            lines.append(f"{i}. {reg_line(r)}")
+        lines += _list_block(main_regs)
     else:
         lines.append("<i>— пока никого нет</i>")
 
     if waitlist_regs:
         lines.append("")
         lines.append(f"<b>📋 Лист ожидания ({len(waitlist_regs)}):</b>")
-        for i, r in enumerate(waitlist_regs, 1):
-            lines.append(f"{i}. {reg_line(r)}")
+        lines += _list_block(waitlist_regs)
 
     return "\n".join(lines)

@@ -171,7 +171,8 @@ def announce_keyboard(
     rows = [[InlineKeyboardButton(text=label, url=f"{base}{tid}")]]
     if maps_url:
         rows.append([InlineKeyboardButton(text="🔗 Открыть в Maps", url=maps_url)])
-    for s in (singles or []):
+    # Ограничиваем число кнопок-одиночек (Telegram-лимит и читаемость).
+    for s in (singles or [])[:12]:
         name = s.get("player_name") or "игроку"
         rows.append([
             InlineKeyboardButton(

@@ -51,6 +51,9 @@ async def _roster(tid: str):
     kb: list[list[InlineKeyboardButton]] = []
     if not main:
         lines.append("— пока никого нет")
+    if len(main) > 40:
+        lines.append(f"<i>(показаны первые 40 из {len(main)})</i>")
+        main = main[:40]
     for i, reg in enumerate(main, 1):
         a = esc(reg.get("player_name") or "—")
         if reg["status"] == "looking":
