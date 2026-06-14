@@ -18,6 +18,7 @@ from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
 
 import db
+from announcement import refresh_announcement
 from formatting import esc
 from keyboards import (
     main_menu,
@@ -178,6 +179,7 @@ async def pair_request_decision_cb(cb: CallbackQuery, bot: Bot):
             await cb.answer(msg, show_alert=True)
             return
 
+        await refresh_announcement(bot, req["tournament_id"])
         await cb.message.edit_text(
             f"✅ Готово! Вы в паре с <b>{bname}</b>{_at(req.get('from_username'))} "
             f"на <b>{title}</b>.\nСкоро пришлём реквизиты на оплату."

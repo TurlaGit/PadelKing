@@ -902,131 +902,26 @@ async def get_tournament(tid: str) -> dict | None:
         return dict(row) if row else None
 
 
-async def get_participants(tid: str) -> list[dict]:
+async def get_user_live_registrations(user_id: int) -> list[dict]:
+    """Живые записи пользователя (как игрок ИЛИ партнёр) + данные турнира.
+    Для экрана «Мои записи»."""
+    placeholders = ",".join("?" * len(ACTIVE_REG_STATUSES))
     async with aiosqlite.connect(DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
         cur = await conn.execute(
-            """
-            SELECT * FROM participants
-            WHERE tournament_id=? AND status IN ('active','waitlist')
-            ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, id ASC
+            f"""
+            SELECT r.id AS reg_id, r.status AS reg_status, r.is_waitlist,
+                   r.is_looking_for_partner, r.player_user_id, r.partner_user_id,
+                   t.id AS tid, t.title, t.date, t.time, t.start_at, t.is_active
+            FROM registrations r
+            JOIN tournaments t ON t.id = r.tournament_id
+            WHERE r.status IN ({placeholders}) AND t.is_active=1
+              AND (r.player_user_id=? OR r.partner_user_id=?)
+            ORDER BY COALESCE(t.start_at, t.date, ''), t.time
             """,
-            (tid,),
+            (*ACTIVE_REG_STATUSES, user_id, user_id),
         )
         return [dict(r) for r in await cur.fetchall()]
-
-
-async def get_user_registrations(user_id: int) -> list[dict]:
-    async with aiosqlite.connect(DB_PATH) as conn:
-        conn.row_factory = aiosqlite.Row
-        cur = await conn.execute(
-            """
-            SELECT t.*, p.status AS my_status
-            FROM participants p
-            JOIN tournaments t ON t.id = p.tournament_id
-            WHERE p.user_id=? AND p.status IN ('active','waitlist') AND t.is_active=1
-            ORDER BY COALESCE(t.date,''), COALESCE(t.time,'')
-            """,
-            (user_id,),
-        )
-        return [dict(r) for r in await cur.fetchall()]
-
-
-async def register_user(
-    tid: str, user_id: int, username: str | None, full_name: str
-) -> dict:
-    """Возвращает {'status': 'active'|'waitlist'|'already'|'no_tournament'}."""
-    async with aiosqlite.connect(DB_PATH) as conn:
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("BEGIN IMMEDIATE")
-        try:
-            cur = await conn.execute(
-                "SELECT max_participants FROM tournaments WHERE id=? AND is_active=1",
-                (tid,),
-            )
-            t = await cur.fetchone()
-            if not t:
-                await conn.rollback()
-                return {"status": "no_tournament"}
-            cap = int(t["max_participants"])
-
-            cur = await conn.execute(
-                "SELECT id, status FROM participants WHERE tournament_id=? AND user_id=?",
-                (tid, user_id),
-            )
-            existing = await cur.fetchone()
-            if existing and existing["status"] in ("active", "waitlist"):
-                await conn.rollback()
-                return {"status": "already"}
-
-            cur = await conn.execute(
-                "SELECT COUNT(*) AS c FROM participants "
-                "WHERE tournament_id=? AND status='active'",
-                (tid,),
-            )
-            active_count = (await cur.fetchone())["c"]
-            new_status = "active" if active_count < cap else "waitlist"
-
-            if existing:
-                await conn.execute(
-                    "UPDATE participants SET status=?, username=?, full_name=?, joined_at=? "
-                    "WHERE id=?",
-                    (new_status, username, full_name, _now(), existing["id"]),
-                )
-            else:
-                await conn.execute(
-                    "INSERT INTO participants "
-                    "(tournament_id, user_id, username, full_name, status, joined_at) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (tid, user_id, username, full_name, new_status, _now()),
-                )
-            await conn.commit()
-            return {"status": new_status}
-        except Exception:
-            await conn.rollback()
-            raise
-
-
-async def cancel_registration(tid: str, user_id: int) -> dict | None:
-    """Снимает запись. Если освободилось основное место — двигает первого
-    из листа ожидания. Возвращает promoted-участника или None."""
-    async with aiosqlite.connect(DB_PATH) as conn:
-        conn.row_factory = aiosqlite.Row
-        await conn.execute("BEGIN IMMEDIATE")
-        try:
-            cur = await conn.execute(
-                "SELECT id, status FROM participants WHERE tournament_id=? AND user_id=?",
-                (tid, user_id),
-            )
-            row = await cur.fetchone()
-            if not row or row["status"] not in ("active", "waitlist"):
-                await conn.rollback()
-                return None
-            was_active = row["status"] == "active"
-            await conn.execute(
-                "UPDATE participants SET status='cancelled' WHERE id=?", (row["id"],)
-            )
-
-            promoted = None
-            if was_active:
-                cur = await conn.execute(
-                    "SELECT * FROM participants "
-                    "WHERE tournament_id=? AND status='waitlist' "
-                    "ORDER BY id ASC LIMIT 1",
-                    (tid,),
-                )
-                wl = await cur.fetchone()
-                if wl:
-                    await conn.execute(
-                        "UPDATE participants SET status='active' WHERE id=?",
-                        (wl["id"],),
-                    )
-                    promoted = dict(wl)
-            await conn.commit()
-            return promoted
-        except Exception:
-            await conn.rollback()
-            raise
 
 
 async def set_announce_message(tid: str, chat_id: int, message_id: int) -> None:

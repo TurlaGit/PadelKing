@@ -16,6 +16,7 @@ from aiogram.filters import CommandObject, CommandStart
 from aiogram.types import CallbackQuery, Message
 
 import db
+from announcement import refresh_announcement
 from config import BOT_USERNAME
 from formatting import esc
 from keyboards import main_menu, partner_confirm
@@ -88,6 +89,7 @@ async def _do_confirm(bot: Bot, rid: int, confirmer) -> str:
     if status != "ok":
         return status
     reg = await db.get_registration(rid)
+    await refresh_announcement(bot, reg["tournament_id"])
     t = await db.get_tournament(reg["tournament_id"])
     title = esc(t["title"]) if t else "турнир"
     # Уведомляем игрока А
@@ -139,6 +141,7 @@ async def partner_confirm_cb(cb: CallbackQuery, bot: Bot):
             return
     else:
         await db.set_registration_status(rid, "cancelled")
+        await refresh_announcement(bot, reg["tournament_id"])
         try:
             await bot.send_message(
                 reg["player_user_id"],

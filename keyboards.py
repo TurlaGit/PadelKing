@@ -127,6 +127,18 @@ def singles_list(tid: str, singles: list[dict]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def my_registrations(regs: list[dict]) -> InlineKeyboardMarkup:
+    rows = []
+    for r in regs:
+        when = " ".join(filter(None, [r.get("date"), r.get("time")])).strip()
+        label = r.get("title") or "Турнир"
+        if when:
+            label = f"{label} • {when}"
+        rows.append([InlineKeyboardButton(text=label[:60], callback_data=f"t:{r['tid']}")])
+    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
 def announce_button(tid: str, label: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
@@ -136,5 +148,45 @@ def announce_button(tid: str, label: str) -> InlineKeyboardMarkup:
                     url=f"https://t.me/{BOT_USERNAME}?start={tid}",
                 )
             ]
+        ]
+    )
+
+
+def announce_keyboard(
+    tid: str,
+    label: str,
+    maps_url: str | None = None,
+    singles: list[dict] | None = None,
+) -> InlineKeyboardMarkup:
+    """Клавиатура под анонсом в ГРУППЕ — только URL-кнопки (deep-link),
+    т.к. диалог должен идти в личке с ботом."""
+    base = f"https://t.me/{BOT_USERNAME}?start="
+    rows = [[InlineKeyboardButton(text=label, url=f"{base}{tid}")]]
+    if maps_url:
+        rows.append([InlineKeyboardButton(text="🔗 Открыть в Maps", url=maps_url)])
+    for s in (singles or []):
+        name = s.get("player_name") or "игроку"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"✋ В пару к {name}"[:60],
+                url=f"{base}pair_{s['id']}",
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def dm_tournament_card(tid: str, my_rid: int | None) -> InlineKeyboardMarkup:
+    """Карточка турнира в личке: записаться / отменить + назад."""
+    if my_rid:
+        action = InlineKeyboardButton(
+            text="❌ Отменить запись", callback_data=f"rcancel:{my_rid}"
+        )
+    else:
+        action = InlineKeyboardButton(text="✅ Записаться", callback_data=f"reg:{tid}")
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [action],
+            [InlineKeyboardButton(text="« К списку", callback_data="list")],
+            [InlineKeyboardButton(text="🏠 В меню", callback_data="menu")],
         ]
     )

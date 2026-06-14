@@ -15,6 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 import db
+from announcement import refresh_announcement
 from content import load_content
 from formatting import esc
 from keyboards import (
@@ -178,6 +179,7 @@ async def partner_received(message: Message, state: FSMContext, bot: Bot):
     log.info("registration %s created (player=%s, partner=@%s, wl=%s)",
              rid, message.from_user.id, raw, reg["waitlisted"])
 
+    await refresh_announcement(bot, tid)
     result = await notify_named_partner(bot, rid)
     if result["mode"] == "direct":
         await _finish(
@@ -200,7 +202,7 @@ async def partner_received(message: Message, state: FSMContext, bot: Bot):
 
 
 @router.callback_query(F.data == "pc:looking")
-async def partner_looking(cb: CallbackQuery, state: FSMContext):
+async def partner_looking(cb: CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
     tid = data.get("tid")
     if not tid:
@@ -221,6 +223,7 @@ async def partner_looking(cb: CallbackQuery, state: FSMContext):
     wl_note = _WAITLIST_NOTE if reg["waitlisted"] else ""
     log.info("registration %s created (player=%s, looking, wl=%s)",
              reg["id"], cb.from_user.id, reg["waitlisted"])
+    await refresh_announcement(bot, tid)
     await _finish(
         cb.message,
         state,
@@ -276,6 +279,7 @@ async def cancel_existing_cb(cb: CallbackQuery, bot: Bot):
     t = await db.get_tournament(tid)
     title = esc(t["title"]) if t else "турнир"
     await cb.message.edit_text(f"Запись на <b>{title}</b> отменена.")
+    await refresh_announcement(bot, tid)
 
     other = res["other_user_id"]
     if other:

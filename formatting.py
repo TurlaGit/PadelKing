@@ -1,4 +1,5 @@
 import html
+import json
 from datetime import date as _date
 
 _WEEKDAYS_RU = {
@@ -16,8 +17,10 @@ def esc(value) -> str:
 def _parse_date(date_str):
     if not date_str:
         return None
+    s = str(date_str).strip()
+    # Поддержка как 'YYYY-MM-DD', так и ISO-datetime 'YYYY-MM-DDTHH:MM...'
     try:
-        return _date.fromisoformat(str(date_str).strip())
+        return _date.fromisoformat(s[:10])
     except ValueError:
         return None
 
@@ -37,12 +40,13 @@ def render_payment(template: str, t: dict) -> str:
     Если в шаблоне нет фигурных скобок — возвращает как есть."""
     if not template or "{" not in template:
         return template or ""
+    date_src = t.get("date") or t.get("start_at")
     ctx = {
         "title": t.get("title", ""),
-        "date": short_date(t.get("date")),
-        "weekday": weekday_ru(t.get("date")),
-        "time": t.get("time", "") or "",
-        "price": t.get("price", "") or "",
+        "date": short_date(date_src),
+        "weekday": weekday_ru(date_src),
+        "time": (t.get("time_start") or t.get("time") or ""),
+        "price": _price_text(t),
         "location": t.get("location", "") or "",
     }
     try:
@@ -56,41 +60,109 @@ class _SafeDict(dict):
         return "{" + key + "}"
 
 
-def participant_line(p: dict) -> str:
-    name = esc(p.get("full_name") or "—")
-    uname = f" @{esc(p['username'])}" if p.get("username") else ""
-    return f"{name}{uname}"
+def _at(username) -> str:
+    return f" @{esc(username)}" if username else ""
 
 
-def format_tournament(t: dict, participants: list[dict] | None = None) -> str:
-    participants = participants or []
-    active = [p for p in participants if p["status"] == "active"]
-    waitlist = [p for p in participants if p["status"] == "waitlist"]
+def _levels_text(t: dict) -> str:
+    raw = t.get("levels")
+    if not raw:
+        return ""
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else list(raw)
+    except (ValueError, TypeError):
+        return str(raw)
+    return ", ".join(str(x) for x in items)
 
-    lines = [f"🏆 <b>{esc(t['title'])}</b>", ""]
-    if t.get("date") or t.get("time"):
-        lines.append(f"📅 {esc(t.get('date',''))} {esc(t.get('time',''))}".rstrip())
-    if t.get("location"):
-        lines.append(f"📍 {esc(t['location'])}")
-    if t.get("price"):
-        lines.append(f"💰 {esc(t['price'])}")
+
+def _price_text(t: dict) -> str:
+    if t.get("price_amount") is not None and t.get("currency"):
+        amount = t["price_amount"]
+        if float(amount).is_integer():
+            # 350000 → "350.000" (формат, привычный для Бали)
+            amount = f"{int(amount):,}".replace(",", ".")
+        return f"{amount} {t['currency']}"
+    return str(t.get("price") or "")
+
+
+def reg_line(reg: dict) -> str:
+    """Строка пары/одиночки в составе."""
+    a = esc(reg.get("player_name") or "—") + _at(reg.get("player_username"))
+    if reg.get("status") == "looking":
+        return f"{a} + 🔍 ищет партнёра"
+    if reg.get("partner_user_id"):
+        b = esc(reg.get("partner_name") or "—") + _at(reg.get("partner_username"))
+        return f"{a} + {b}"
+    if reg.get("partner_username"):
+        return f"{a} + @{esc(reg['partner_username'])} ⏳"
+    return a
+
+
+def tournament_header(t: dict, location: dict | None = None) -> str:
+    lines = [f"🏆 <b>{esc(t.get('title'))}</b>"]
+    fmt = t.get("format_type")
+    if fmt:
+        lines.append(f"Формат: <b>{esc(fmt)}</b>")
     lines.append("")
-    if t.get("description"):
-        lines.append(t["description"].strip())
-        lines.append("")
 
-    cap = int(t.get("max_participants") or 8)
-    lines.append(f"<b>Участники ({len(active)}/{cap}):</b>")
-    if active:
-        for i, p in enumerate(active, 1):
-            lines.append(f"{i}. {participant_line(p)}")
+    date = t.get("date") or short_date(t.get("start_at"))
+    time = " – ".join(filter(None, [t.get("time_start"), t.get("time_end")])) or t.get("time")
+    when = " ".join(filter(None, [esc(date), esc(time)])).strip()
+    if when:
+        lines.append(f"📅 {when}")
+
+    loc_title = (location or {}).get("title") or t.get("location")
+    loc_url = (location or {}).get("maps_url")
+    if loc_title:
+        lines.append(f"📍 {esc(loc_title)}")
+    if loc_url:
+        lines.append(f"🔗 {esc(loc_url)}")
+
+    game_format = t.get("game_format")
+    if game_format:
+        lines.append("")
+        lines.append("🎮 <b>Формат игры:</b>")
+        lines.append(esc(game_format).strip())
+
+    levels = _levels_text(t)
+    if levels:
+        lines.append(f"🎯 Уровень: {esc(levels)}")
+
+    price = _price_text(t)
+    if price:
+        lines.append(f"💰 Стоимость: {esc(price)}")
+
+    note = t.get("extra_note") or t.get("description")
+    if note:
+        lines.append("")
+        lines.append(esc(note).strip())
+
+    lines.append("")
+    lines.append("‼️ <i>Участие подтверждается после оплаты</i>")
+    return "\n".join(lines)
+
+
+def render_tournament(
+    t: dict,
+    location: dict | None,
+    main_regs: list[dict],
+    waitlist_regs: list[dict],
+) -> str:
+    lines = [tournament_header(t, location), ""]
+
+    cap = t.get("max_pairs")
+    cap_str = f"/{cap}" if cap else ""
+    lines.append(f"<b>Участники ({len(main_regs)}{cap_str} пар):</b>")
+    if main_regs:
+        for i, r in enumerate(main_regs, 1):
+            lines.append(f"{i}. {reg_line(r)}")
     else:
         lines.append("<i>— пока никого нет</i>")
 
-    if waitlist:
+    if waitlist_regs:
         lines.append("")
-        lines.append(f"<b>Лист ожидания ({len(waitlist)}):</b>")
-        for i, p in enumerate(waitlist, 1):
-            lines.append(f"{i}. {participant_line(p)}")
+        lines.append(f"<b>📋 Лист ожидания ({len(waitlist_regs)}):</b>")
+        for i, r in enumerate(waitlist_regs, 1):
+            lines.append(f"{i}. {reg_line(r)}")
 
     return "\n".join(lines)
