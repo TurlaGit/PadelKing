@@ -1,10 +1,4 @@
-from aiogram.types import (
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    ReplyKeyboardRemove,
-)
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import BOT_USERNAME
 
@@ -19,21 +13,12 @@ def main_menu() -> InlineKeyboardMarkup:
     )
 
 
-# Постоянная клавиатура снизу — всегда под рукой у игрока.
-PLAYER_REPLY = ReplyKeyboardMarkup(
-    resize_keyboard=True, is_persistent=True,
-    keyboard=[
-        [KeyboardButton(text="🏆 Турниры"), KeyboardButton(text="📋 Мои записи")],
-        [KeyboardButton(text="❓ Помощь")],
-    ],
-)
-PLAYER_REPLY_REMOVE = ReplyKeyboardRemove()
 
 
 def back_to_menu() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="« В меню", callback_data="menu")],
+            [InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")],
         ]
     )
 
@@ -171,8 +156,19 @@ def my_registrations(regs: list[dict]) -> InlineKeyboardMarkup:
         label = r.get("title") or "Турнир"
         if when:
             label = f"{label} • {when}"
-        rows.append([InlineKeyboardButton(text=label[:60], callback_data=f"t:{r['tid']}")])
-    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu")])
+        rows.append([InlineKeyboardButton(text=label[:60], callback_data=f"myreg:{r['reg_id']}")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def my_reg_card(rid: int, pay_status: str | None, can_cancel: bool = True) -> InlineKeyboardMarkup:
+    rows = []
+    if pay_status in ("unpaid", "rejected", None):
+        rows.append([InlineKeyboardButton(text="💸 Оплатить", callback_data=f"mypay:{rid}")])
+    if can_cancel:
+        rows.append([InlineKeyboardButton(text="❌ Отменить запись", callback_data=f"rcancel:{rid}")])
+    rows.append([InlineKeyboardButton(text="⬅️ К моим записям", callback_data="my_regs")])
+    rows.append([InlineKeyboardButton(text="🏠 Главное меню", callback_data="menu")])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 

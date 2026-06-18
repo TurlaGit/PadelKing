@@ -13,11 +13,12 @@ from aiogram.types import CallbackQuery, Message, TelegramObject, User
 import db
 from content import load_content
 from formatting import esc, render_tournament
+from config import ADMIN_IDS
 from keyboards import (
-    PLAYER_REPLY,
     back_to_menu,
     dm_tournament_card,
     main_menu,
+    my_reg_card,
     my_registrations,
     tournaments_list,
 )
@@ -89,42 +90,33 @@ async def start_deep_link(message: Message, command: CommandObject):
     await message.answer(text, reply_markup=markup)
 
 
+def _player_greeting(user) -> str:
+    name = esc(user.first_name or "")
+    base = (f"Привет, <b>{name}</b>! 👋\n\n" if name else "Привет! 👋\n\n")
+    base += "Это бот клуба <b>PadelKing</b>. Что нужно?"
+    return base
+
+
 @router.message(CommandStart())
 async def start(message: Message):
-    # Сначала ставим постоянное reply-меню снизу, потом inline-меню в чате.
-    await message.answer(_texts()["welcome"], reply_markup=PLAYER_REPLY)
-    await message.answer("Выбери раздел:", reply_markup=main_menu())
-
-
-# Текстовые шорткаты с reply-кнопок снизу
-@router.message(F.text == "🏆 Турниры")
-async def shortcut_list(message: Message):
-    tournaments = await db.list_active_tournaments()
-    if not tournaments:
-        await message.answer(_texts()["no_tournaments"], reply_markup=back_to_menu())
+    # Админу — сразу его меню (импортим внутри, чтобы избежать циклов).
+    if message.from_user.id in ADMIN_IDS:
+        from admin import _admin_greeting, _admin_menu_kb
+        await message.answer(_admin_greeting(message.from_user),
+                              reply_markup=_admin_menu_kb())
         return
-    await message.answer(_texts()["list_header"], reply_markup=tournaments_list(tournaments))
-
-
-@router.message(F.text == "📋 Мои записи")
-async def shortcut_my_regs(message: Message):
-    regs = await db.get_user_live_registrations(message.from_user.id)
-    if not regs:
-        await message.answer(_texts()["my_regs_empty"], reply_markup=back_to_menu())
-        return
-    await message.answer(_my_regs_text(regs), reply_markup=my_registrations(regs))
-
-
-@router.message(F.text == "❓ Помощь")
-async def shortcut_contact(message: Message):
-    await message.answer(_texts()["admin_contact"], reply_markup=back_to_menu())
+    await message.answer(_player_greeting(message.from_user), reply_markup=main_menu())
 
 
 # ---------- навигация ----------
 
 @router.callback_query(F.data == "menu")
 async def cb_menu(cb: CallbackQuery):
-    await _safe_edit(cb.message, _texts()["welcome"], main_menu())
+    if cb.from_user.id in ADMIN_IDS:
+        from admin import _admin_greeting, _admin_menu_kb
+        await _safe_edit(cb.message, _admin_greeting(cb.from_user), _admin_menu_kb())
+    else:
+        await _safe_edit(cb.message, _player_greeting(cb.from_user), main_menu())
     await cb.answer()
 
 
@@ -184,6 +176,63 @@ async def cb_my_regs(cb: CallbackQuery):
         return
     await _safe_edit(cb.message, _my_regs_text(regs), my_registrations(regs))
     await cb.answer()
+
+
+# ---------- экран «Моя запись» ----------
+
+@router.callback_query(F.data.startswith("myreg:"))
+async def cb_my_reg(cb: CallbackQuery):
+    rid = int(cb.data.split(":", 1)[1])
+    reg = await db.get_registration(rid)
+    if not reg:
+        await cb.answer("Запись не найдена.", show_alert=True)
+        return
+    # доступ — только своя запись
+    if cb.from_user.id not in (reg.get("player_user_id"), reg.get("partner_user_id")):
+        await cb.answer("Это не твоя запись.", show_alert=True)
+        return
+    t = await db.get_tournament(reg["tournament_id"])
+    pay = await db.get_payment_for_user(rid, cb.from_user.id)
+    pay_status = pay["status"] if pay else None
+
+    when = " ".join(filter(None, [t.get("date"), t.get("time_start") or t.get("time")])).strip()
+    if reg["status"] == "looking":
+        status_line = "🔍 ищет партнёра"
+    elif reg["is_waitlist"]:
+        status_line = "📋 лист ожидания"
+    elif reg["status"] == "pending_confirm":
+        status_line = "⏳ ждёт партнёра"
+    else:
+        status_line = "✅ в составе"
+
+    a = esc(reg.get("player_name") or "—")
+    b = esc(reg.get("partner_name") or ("🔍 ищет партнёра" if reg["is_looking_for_partner"] else "—"))
+    pay_label = _PAY_ICON.get(pay_status or "", "—") if reg["status"] == "active" and not reg["is_waitlist"] else "—"
+    lines = [
+        "📋 <b>Твоя запись</b>",
+        "",
+        f"🏆 <b>{esc(t['title'])}</b>" + (f" · {esc(when)}" if when else ""),
+        f"👥 Пара: {a} + {b}",
+        f"Статус: {status_line}",
+        f"💸 Оплата: {pay_label}",
+    ]
+    await _safe_edit(cb.message, "\n".join(lines),
+                      my_reg_card(rid, pay_status, can_cancel=True))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("mypay:"))
+async def cb_my_pay(cb: CallbackQuery):
+    """Игрок жмёт «💸 Оплатить» — присылаем ему реквизиты заново."""
+    rid = int(cb.data.split(":", 1)[1])
+    reg = await db.get_registration(rid)
+    if not reg or cb.from_user.id not in (reg.get("player_user_id"), reg.get("partner_user_id")):
+        await cb.answer("Запись не найдена.", show_alert=True)
+        return
+    from payments import resend_requisites_to_user
+    t = await db.get_tournament(reg["tournament_id"])
+    await resend_requisites_to_user(cb.bot, rid, cb.from_user.id, t)
+    await cb.answer("Реквизиты отправлены 👇")
 
 
 @router.callback_query(F.data.startswith("t:"))

@@ -39,6 +39,26 @@ def _file_id(message: Message) -> str | None:
     return None
 
 
+async def resend_requisites_to_user(bot: Bot, rid: int, user_id: int, t: dict | None = None) -> None:
+    """Шлёт игроку реквизиты конкретно по этой паре (для кнопки
+    «💸 Оплатить» в «Мои записи»). Если пара ещё неполная — создаём
+    платёжные строки только если оба user_id известны."""
+    if not t:
+        reg = await db.get_registration(rid)
+        if not reg:
+            return
+        t = await db.get_tournament(reg["tournament_id"])
+    pays = await db.ensure_pair_payments(rid)
+    payment = next((p for p in pays if p["user_id"] == user_id), None)
+    body = render_payment(_texts().get("payment", "").strip(), t or {})
+    text = (body or "💳 Реквизиты для оплаты турнира.") + "\n\nКак ты оплачиваешь?"
+    pays_for = payment["pays_for"] if payment else "self"
+    try:
+        await bot.send_message(user_id, text, reply_markup=pay_choice(rid, pays_for))
+    except Exception as e:
+        log.info("Реквизиты не доставлены игроку %s: %s", user_id, e)
+
+
 async def send_requisites_to_pair(bot: Bot, rid: int) -> None:
     """Создаёт платёжные строки и шлёт реквизиты обоим игрокам пары."""
     payments = await db.ensure_pair_payments(rid)
