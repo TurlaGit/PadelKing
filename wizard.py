@@ -6,6 +6,7 @@
 """
 import json
 import logging
+import re
 import uuid
 from datetime import date as _date
 
@@ -135,7 +136,9 @@ async def _go_price(message: Message, state: FSMContext):
 async def _go_max_pairs(message: Message, state: FSMContext):
     await state.set_state(NewTournament.max_pairs)
     await message.answer(
-        "👥 Максимум пар (число) — или нажми «Без лимита»:",
+        "👥 Количество <b>участников</b>: укажи число (например <code>16</code>) "
+        "или диапазон (например <code>12-16</code>). Лишние пойдут в лист ожидания.\n"
+        "Можно «Без лимита». Если введёшь нечётное — округлим вверх до пары.",
         reply_markup=_kb([[_btn("♾ Без лимита", "twmp:none")]]),
     )
 
@@ -164,6 +167,7 @@ def _preview_tournament(data: dict) -> tuple[dict, dict | None]:
         "currency": data.get("currency"),
         "price_amount": data.get("price_amount"),
         "max_pairs": data.get("max_pairs"),
+        "min_pairs": data.get("min_pairs"),
         "extra_note": data.get("extra_note"),
         "start_at": data.get("date_iso"),
     }
@@ -456,18 +460,37 @@ async def st_price(message: Message, state: FSMContext):
 
 @router.callback_query(F.data == "twmp:none")
 async def st_max_none(cb: CallbackQuery, state: FSMContext):
-    await state.update_data(max_pairs=None)
+    await state.update_data(max_pairs=None, min_pairs=None)
     await _after_step(cb.message, state, _go_extra)
     await cb.answer()
+
+
+_RANGE_RE = re.compile(r"^\s*(\d+)\s*[-–—]\s*(\d+)\s*$")
+
+
+def _to_pairs(n: int) -> int:
+    """Игроки → пары (округление вверх)."""
+    return (n + 1) // 2
 
 
 @router.message(NewTournament.max_pairs, F.text)
 async def st_max_pairs(message: Message, state: FSMContext):
     raw = message.text.strip()
-    if not raw.isdigit() or int(raw) <= 0:
-        await message.answer("Нужно положительное число или кнопка «Без лимита»:")
+    m = _RANGE_RE.match(raw)
+    if m:
+        a, b = int(m.group(1)), int(m.group(2))
+        if a <= 0 or b <= 0 or a > b:
+            await message.answer("Диапазон должен быть вида <code>12-16</code> (мин ≤ макс).")
+            return
+        await state.update_data(min_pairs=_to_pairs(a), max_pairs=_to_pairs(b))
+    elif raw.isdigit() and int(raw) > 0:
+        await state.update_data(min_pairs=None, max_pairs=_to_pairs(int(raw)))
+    else:
+        await message.answer(
+            "Нужно число (<code>16</code>) или диапазон (<code>12-16</code>) участников, "
+            "либо нажми «Без лимита»."
+        )
         return
-    await state.update_data(max_pairs=int(raw))
     await state.set_state(None)
     await _after_step(message, state, _go_extra)
 
@@ -515,6 +538,7 @@ async def _insert_from_data(data: dict, publish_at_iso: str | None, status: str)
         "currency": data.get("currency"),
         "price_amount": data.get("price_amount"),
         "max_pairs": data.get("max_pairs"),
+        "min_pairs": data.get("min_pairs"),
         "extra_note": data.get("extra_note"),
         "start_at": to_iso(start_at),
         "payment_deadline": to_iso(deadline),

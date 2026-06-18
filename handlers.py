@@ -67,7 +67,11 @@ async def _render_card(tid: str, user_id: int):
     waitlist = await db.get_waitlist_registrations(tid)
     text = render_tournament(t, location, main, waitlist)
     mine = await db.get_user_registration_in(tid, user_id)
-    markup = dm_tournament_card(tid, mine["id"] if mine else None)
+    markup = dm_tournament_card(
+        tid,
+        mine["id"] if mine else None,
+        closed=bool(t.get("is_closed")),
+    )
     return text, markup
 
 

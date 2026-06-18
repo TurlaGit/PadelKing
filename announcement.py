@@ -37,7 +37,8 @@ async def refresh_announcement(bot: Bot, tid: str) -> None:
     label = (load_content()["texts"].get("announce_button") or "✅ Записаться").strip()
     singles = [r for r in main if r["status"] == "looking"]
     maps_url = (location or {}).get("maps_url")
-    markup = announce_keyboard(tid, label, maps_url, singles)
+    markup = announce_keyboard(tid, label, maps_url, singles,
+                               closed=bool(t.get("is_closed")))
     preview = LinkPreviewOptions(is_disabled=True)
 
     existing_chat = t.get("announce_chat_id")

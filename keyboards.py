@@ -164,13 +164,20 @@ def announce_keyboard(
     label: str,
     maps_url: str | None = None,
     singles: list[dict] | None = None,
+    closed: bool = False,
 ) -> InlineKeyboardMarkup:
     """Клавиатура под анонсом в ГРУППЕ — только URL-кнопки (deep-link),
     т.к. диалог должен идти в личке с ботом."""
     base = f"https://t.me/{BOT_USERNAME}?start="
-    rows = [[InlineKeyboardButton(text=label, url=f"{base}{tid}")]]
+    if closed:
+        # Запись закрыта — главная кнопка ведёт только посмотреть карточку.
+        rows = [[InlineKeyboardButton(text="🔒 Запись закрыта", url=f"{base}{tid}")]]
+    else:
+        rows = [[InlineKeyboardButton(text=label, url=f"{base}{tid}")]]
     if maps_url:
         rows.append([InlineKeyboardButton(text="🔗 Открыть в Maps", url=maps_url)])
+    if closed:
+        return InlineKeyboardMarkup(inline_keyboard=rows)
     # Ограничиваем число кнопок-одиночек (Telegram-лимит и читаемость).
     for s in (singles or [])[:12]:
         name = s.get("player_name") or "игроку"
@@ -183,18 +190,15 @@ def announce_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def dm_tournament_card(tid: str, my_rid: int | None) -> InlineKeyboardMarkup:
+def dm_tournament_card(tid: str, my_rid: int | None, closed: bool = False) -> InlineKeyboardMarkup:
     """Карточка турнира в личке: записаться / отменить + назад."""
+    rows = []
     if my_rid:
-        action = InlineKeyboardButton(
-            text="❌ Отменить запись", callback_data=f"rcancel:{my_rid}"
-        )
-    else:
-        action = InlineKeyboardButton(text="✅ Записаться", callback_data=f"reg:{tid}")
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [action],
-            [InlineKeyboardButton(text="« К списку", callback_data="list")],
-            [InlineKeyboardButton(text="🏠 В меню", callback_data="menu")],
-        ]
-    )
+        # Запись свою всегда можно отменить (даже если запись закрыта).
+        rows.append([InlineKeyboardButton(
+            text="❌ Отменить запись", callback_data=f"rcancel:{my_rid}")])
+    elif not closed:
+        rows.append([InlineKeyboardButton(text="✅ Записаться", callback_data=f"reg:{tid}")])
+    rows.append([InlineKeyboardButton(text="« К списку", callback_data="list")])
+    rows.append([InlineKeyboardButton(text="🏠 В меню", callback_data="menu")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)

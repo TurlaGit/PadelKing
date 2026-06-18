@@ -65,14 +65,33 @@ def _at(username) -> str:
 
 
 def _levels_text(t: dict) -> str:
+    items = _levels_list(t)
+    return ", ".join(items)
+
+
+def _levels_list(t: dict) -> list[str]:
     raw = t.get("levels")
     if not raw:
-        return ""
+        return []
     try:
         items = json.loads(raw) if isinstance(raw, str) else list(raw)
     except (ValueError, TypeError):
-        return str(raw)
-    return ", ".join(str(x) for x in items)
+        return [str(raw)]
+    return [str(x) for x in items]
+
+
+def level_emoji(t: dict) -> str:
+    """Эмодзи по уровню турнира: берём высший из выбранных."""
+    levels = " ".join(_levels_list(t)).lower()
+    if "gold" in levels:
+        return "🥇"
+    if "silver" in levels:
+        return "🩶"
+    if "bronze" in levels:
+        return "🥉"
+    if "beginner" in levels:
+        return "🟢"
+    return "🏆"
 
 
 def _price_text(t: dict) -> str:
@@ -99,7 +118,7 @@ def reg_line(reg: dict) -> str:
 
 
 def tournament_header(t: dict, location: dict | None = None) -> str:
-    lines = [f"🏆 <b>{esc(t.get('title'))}</b>"]
+    lines = [f"{level_emoji(t)} <b>{esc(t.get('title'))}</b>"]
     fmt = t.get("format_type")
     if fmt:
         lines.append(f"Формат: <b>{esc(fmt)}</b>")
@@ -131,6 +150,11 @@ def tournament_header(t: dict, location: dict | None = None) -> str:
     price = _price_text(t)
     if price:
         lines.append(f"💰 Стоимость: {esc(price)}")
+
+    if t.get("min_pairs") and t.get("max_pairs"):
+        lines.append(f"👥 Участников: {t['min_pairs']*2}–{t['max_pairs']*2}")
+    elif t.get("max_pairs"):
+        lines.append(f"👥 Максимум участников: {t['max_pairs']*2}")
 
     note = t.get("extra_note") or t.get("description")
     if note:

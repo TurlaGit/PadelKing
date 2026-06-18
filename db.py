@@ -171,6 +171,14 @@ _TOURNAMENT_NEW_COLUMNS: list[tuple[str, str]] = [
     ("source",           "TEXT"),
     # Яне уже отправлен список неоплативших за час до дедлайна
     ("unpaid_notified",  "INTEGER NOT NULL DEFAULT 0"),
+    # Минимум пар (информативно, для отображения «требуется минимум …»).
+    ("min_pairs",        "INTEGER"),
+    # Запись закрыта администратором: новые записи запрещены, в анонсе
+    # кнопка «🔒 Запись закрыта».
+    ("is_closed",        "INTEGER NOT NULL DEFAULT 0"),
+    # За 3ч до старта мы уже разослали WL «турнир укомплектован» (если
+    # к этому моменту никто из WL не поднялся в состав).
+    ("waitlist_closed_notified", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 # Колонки registrations, добавляемые миграцией к уже созданным БД.
@@ -179,6 +187,8 @@ _REGISTRATION_NEW_COLUMNS: list[tuple[str, str]] = [
     # окно оплаты для поднятых из листа ожидания (ISO WITA), переопределяет
     # стандартный дедлайн турнира
     ("promo_deadline", "TEXT"),
+    # за сутки до турнира пара уже получила напоминание «завтра играем»
+    ("day_reminder_sent", "INTEGER NOT NULL DEFAULT 0"),
 ]
 
 _BUILTIN_LEVELS = [
@@ -1291,6 +1301,15 @@ async def deactivate_missing(known_ids: list[str]) -> None:
         await conn.commit()
 
 
+async def set_registration_closed(tid: str, closed: bool) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE tournaments SET is_closed=? WHERE id=?",
+            (1 if closed else 0, tid),
+        )
+        await conn.commit()
+
+
 async def insert_tournament(data: dict) -> str:
     """Создаёт турнир из визарда (source='admin'). Ожидает ключи:
     id, title, format_type, date, time_start, time_end, location_id,
@@ -1302,19 +1321,21 @@ async def insert_tournament(data: dict) -> str:
             """
             INSERT INTO tournaments
                 (id, title, format_type, date, time_start, time_end, location_id,
-                 game_format, levels, currency, price_amount, max_pairs, extra_note,
-                 start_at, payment_deadline, publish_at, status_v2, is_active, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin')
+                 game_format, levels, currency, price_amount, max_pairs, min_pairs,
+                 extra_note, start_at, payment_deadline, publish_at, status_v2,
+                 is_active, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin')
             """,
             (
                 data["id"], data.get("title"), data.get("format_type"),
                 data.get("date"), data.get("time_start"), data.get("time_end"),
                 data.get("location_id"), data.get("game_format"),
                 data.get("levels"), data.get("currency"), data.get("price_amount"),
-                data.get("max_pairs"), data.get("extra_note"),
+                data.get("max_pairs"), data.get("min_pairs"),
+                data.get("extra_note"),
                 data.get("start_at"), data.get("payment_deadline"),
                 data.get("publish_at"), data.get("status_v2", "published"),
-                1 if data.get("publish_at") is None else 1,
+                1,
             ),
         )
         await conn.commit()
@@ -1586,6 +1607,56 @@ async def expire_due_pair_requests(now_iso: str) -> list[dict]:
         except Exception:
             await conn.rollback()
             raise
+
+
+async def list_active_regs_for_day_reminder(start_lo: str, start_hi: str) -> list[dict]:
+    """Активные пары (не WL) в опубликованных турнирах, старт которых в окне."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            """
+            SELECT r.*, t.title, t.start_at, t.time_start, t.time_end
+            FROM registrations r JOIN tournaments t ON t.id=r.tournament_id
+            WHERE r.status='active' AND r.is_waitlist=0
+              AND COALESCE(r.day_reminder_sent,0)=0
+              AND t.is_active=1 AND t.status_v2='published'
+              AND t.start_at IS NOT NULL AND t.start_at>=? AND t.start_at<=?
+            """,
+            (start_lo, start_hi),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def mark_day_reminder_sent(rid: int) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE registrations SET day_reminder_sent=1 WHERE id=?", (rid,)
+        )
+        await conn.commit()
+
+
+async def list_waitlist_to_close(start_lo: str, start_hi: str) -> list[dict]:
+    """Турниры в окне [старт-3.5ч, старт-2.5ч] с непустым WL, ещё не уведомленные."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            """
+            SELECT * FROM tournaments
+            WHERE is_active=1 AND status_v2='published'
+              AND COALESCE(waitlist_closed_notified,0)=0
+              AND start_at IS NOT NULL AND start_at>=? AND start_at<=?
+            """,
+            (start_lo, start_hi),
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def mark_waitlist_closed_notified(tid: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE tournaments SET waitlist_closed_notified=1 WHERE id=?", (tid,)
+        )
+        await conn.commit()
 
 
 async def cleanup_old_screenshots(cutoff_iso: str) -> int:

@@ -75,6 +75,9 @@ async def reg_start(cb: CallbackQuery, state: FSMContext):
     if not t or not t.get("is_active"):
         await cb.answer(_texts()["not_found"], show_alert=True)
         return
+    if t.get("is_closed"):
+        await cb.answer("Запись на этот турнир закрыта 🔒", show_alert=True)
+        return
     existing = await db.get_user_registration_in(tid, cb.from_user.id)
     if existing:
         await cb.answer("Ты уже записан на этот турнир ✅", show_alert=True)

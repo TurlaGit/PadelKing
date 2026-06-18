@@ -75,6 +75,9 @@ async def _roster(tid: str):
             callback_data=f"apm:{reg['id']}",
         )])
     kb.append([InlineKeyboardButton(text="🗂 Снятые пары", callback_data=f"apcanc:{tid}")])
+    t = await db.get_tournament(tid)
+    toggle = "🔓 Открыть запись" if t and t.get("is_closed") else "🔒 Закрыть запись"
+    kb.append([InlineKeyboardButton(text=toggle, callback_data=f"aclose:{tid}")])
     kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"apay:{tid}")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
 
@@ -293,6 +296,49 @@ async def manual_confirm(cb: CallbackQuery, bot: Bot):
     text, kb = await _roster(reg["tournament_id"])
     await _safe_edit(cb.message, text, kb)
     await cb.answer("Отмечено ✅")
+
+
+# ---------- закрыть/открыть запись ----------
+
+@router.callback_query(F.data.startswith("aclose:"))
+async def toggle_close(cb: CallbackQuery, bot: Bot):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    tid = cb.data.split(":", 1)[1]
+    t = await db.get_tournament(tid)
+    if not t:
+        await cb.answer("Не найдено.", show_alert=True)
+        return
+    new_closed = not bool(t.get("is_closed"))
+    await db.set_registration_closed(tid, new_closed)
+    await refresh_announcement(bot, tid)
+    text, kb = await _roster(tid)
+    await _safe_edit(cb.message, text, kb)
+    await cb.answer("Запись закрыта 🔒" if new_closed else "Запись открыта 🔓")
+
+
+# ---------- /mylist <id> — список участников + оплаты ----------
+
+@router.message(Command("mylist"))
+async def cmd_mylist(message: Message):
+    if not _is_admin(message.from_user.id):
+        return
+    parts = (message.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        ts = await db.list_active_tournaments()
+        if not ts:
+            await message.answer("Активных турниров нет.")
+            return
+        await message.answer("Выбери турнир:", reply_markup=_tournaments_kb(ts, "apay"))
+        return
+    tid = parts[1].strip()
+    t = await db.get_tournament(tid)
+    if not t:
+        await message.answer("Турнир не найден.")
+        return
+    text, kb = await _roster(tid)
+    await message.answer(text, reply_markup=kb)
 
 
 # ---------- снятие пары админом ----------

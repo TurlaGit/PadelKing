@@ -175,6 +175,39 @@ async def expire_pair_requests(bot: Bot, now) -> None:
             reply_markup=pair_declined_options(r["tournament_id"]))
 
 
+async def day_before_reminders(bot: Bot, now) -> None:
+    """За ~24 часа до старта — напоминание участникам о турнире (один раз на пару)."""
+    lo = to_iso(now + timedelta(hours=23))
+    hi = to_iso(now + timedelta(hours=25))
+    for r in await db.list_active_regs_for_day_reminder(lo, hi):
+        title = esc(r.get("title") or "турнир")
+        tstart = r.get("time_start") or ""
+        text = (f"⏰ Завтра турнир <b>{title}</b>"
+                + (f" в <b>{tstart}</b>" if tstart else "")
+                + "!\nДо встречи на корте 🎾")
+        for uid in (r.get("player_user_id"), r.get("partner_user_id")):
+            if uid:
+                await _dm(bot, uid, text)
+        await db.mark_day_reminder_sent(r["id"])
+
+
+async def close_waitlist_before_start(bot: Bot, now) -> None:
+    """За ~3 часа до старта: если в WL остались пары — шлём «увы, мест нет»."""
+    lo = to_iso(now + timedelta(hours=2, minutes=30))
+    hi = to_iso(now + timedelta(hours=3, minutes=30))
+    for t in await db.list_waitlist_to_close(lo, hi):
+        title = esc(t.get("title") or "турнир")
+        wl = await db.get_waitlist_registrations(t["id"])
+        for reg in wl:
+            for uid in (reg.get("player_user_id"), reg.get("partner_user_id")):
+                if uid:
+                    await _dm(bot, uid,
+                        f"😔 Сегодняшний турнир «{title}» укомплектован, "
+                        "места в листе ожидания не освободились. "
+                        "Ждём вас в следующий раз 🎾")
+        await db.mark_waitlist_closed_notified(t["id"])
+
+
 async def cleanup_screenshots(bot: Bot, now) -> None:
     cutoff = to_iso(now - timedelta(days=SCREENSHOT_TTL_DAYS))
     n = await db.cleanup_old_screenshots(cutoff)
@@ -190,6 +223,8 @@ async def _tick(bot: Bot) -> None:
     await payment_reminders(bot, now)
     await notify_yana_unpaid(bot, now)
     await auto_remove_unpaid(bot, now)
+    await day_before_reminders(bot, now)
+    await close_waitlist_before_start(bot, now)
     await expire_pair_requests(bot, now)
     await cleanup_screenshots(bot, now)
 
