@@ -1,4 +1,10 @@
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 
 from config import BOT_USERNAME
 
@@ -11,6 +17,17 @@ def main_menu() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="❓ Связь с админом", callback_data="contact")],
         ]
     )
+
+
+# Постоянная клавиатура снизу — всегда под рукой у игрока.
+PLAYER_REPLY = ReplyKeyboardMarkup(
+    resize_keyboard=True, is_persistent=True,
+    keyboard=[
+        [KeyboardButton(text="🏆 Турниры"), KeyboardButton(text="📋 Мои записи")],
+        [KeyboardButton(text="❓ Помощь")],
+    ],
+)
+PLAYER_REPLY_REMOVE = ReplyKeyboardRemove()
 
 
 def back_to_menu() -> InlineKeyboardMarkup:

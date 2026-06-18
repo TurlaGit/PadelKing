@@ -1362,8 +1362,8 @@ async def get_tournament(tid: str) -> dict | None:
 
 
 async def get_user_live_registrations(user_id: int) -> list[dict]:
-    """Живые записи пользователя (как игрок ИЛИ партнёр) + данные турнира.
-    Для экрана «Мои записи»."""
+    """Живые записи пользователя (как игрок ИЛИ партнёр) + данные турнира +
+    свой статус оплаты. Для экрана «Мои записи»."""
     placeholders = ",".join("?" * len(ACTIVE_REG_STATUSES))
     async with aiosqlite.connect(DB_PATH) as conn:
         conn.row_factory = aiosqlite.Row
@@ -1371,14 +1371,16 @@ async def get_user_live_registrations(user_id: int) -> list[dict]:
             f"""
             SELECT r.id AS reg_id, r.status AS reg_status, r.is_waitlist,
                    r.is_looking_for_partner, r.player_user_id, r.partner_user_id,
-                   t.id AS tid, t.title, t.date, t.time, t.start_at, t.is_active
+                   t.id AS tid, t.title, t.date, t.time, t.start_at, t.is_active,
+                   (SELECT p.status FROM payments p
+                    WHERE p.registration_id=r.id AND p.user_id=?) AS my_pay_status
             FROM registrations r
             JOIN tournaments t ON t.id = r.tournament_id
             WHERE r.status IN ({placeholders}) AND t.is_active=1
               AND (r.player_user_id=? OR r.partner_user_id=?)
             ORDER BY COALESCE(t.start_at, t.date, ''), t.time
             """,
-            (*ACTIVE_REG_STATUSES, user_id, user_id),
+            (user_id, *ACTIVE_REG_STATUSES, user_id, user_id),
         )
         return [dict(r) for r in await cur.fetchall()]
 

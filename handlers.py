@@ -14,6 +14,7 @@ import db
 from content import load_content
 from formatting import esc, render_tournament
 from keyboards import (
+    PLAYER_REPLY,
     back_to_menu,
     dm_tournament_card,
     main_menu,
@@ -90,7 +91,33 @@ async def start_deep_link(message: Message, command: CommandObject):
 
 @router.message(CommandStart())
 async def start(message: Message):
-    await message.answer(_texts()["welcome"], reply_markup=main_menu())
+    # Сначала ставим постоянное reply-меню снизу, потом inline-меню в чате.
+    await message.answer(_texts()["welcome"], reply_markup=PLAYER_REPLY)
+    await message.answer("Выбери раздел:", reply_markup=main_menu())
+
+
+# Текстовые шорткаты с reply-кнопок снизу
+@router.message(F.text == "🏆 Турниры")
+async def shortcut_list(message: Message):
+    tournaments = await db.list_active_tournaments()
+    if not tournaments:
+        await message.answer(_texts()["no_tournaments"], reply_markup=back_to_menu())
+        return
+    await message.answer(_texts()["list_header"], reply_markup=tournaments_list(tournaments))
+
+
+@router.message(F.text == "📋 Мои записи")
+async def shortcut_my_regs(message: Message):
+    regs = await db.get_user_live_registrations(message.from_user.id)
+    if not regs:
+        await message.answer(_texts()["my_regs_empty"], reply_markup=back_to_menu())
+        return
+    await message.answer(_my_regs_text(regs), reply_markup=my_registrations(regs))
+
+
+@router.message(F.text == "❓ Помощь")
+async def shortcut_contact(message: Message):
+    await message.answer(_texts()["admin_contact"], reply_markup=back_to_menu())
 
 
 # ---------- навигация ----------
@@ -118,13 +145,16 @@ async def cb_list(cb: CallbackQuery):
     await cb.answer()
 
 
-@router.callback_query(F.data == "my_regs")
-async def cb_my_regs(cb: CallbackQuery):
-    regs = await db.get_user_live_registrations(cb.from_user.id)
-    if not regs:
-        await _safe_edit(cb.message, _texts()["my_regs_empty"], back_to_menu())
-        await cb.answer()
-        return
+_PAY_ICON = {
+    "paid": "💸 оплачено",
+    "paid_manual": "💸 оплачено",
+    "pending_review": "🧾 скрин на проверке",
+    "rejected": "❌ оплата отклонена",
+    "unpaid": "⏳ ждём оплату",
+}
+
+
+def _my_regs_text(regs: list[dict]) -> str:
     lines = [_texts()["my_regs_header"], ""]
     for r in regs:
         if r["reg_status"] == "looking":
@@ -137,8 +167,22 @@ async def cb_my_regs(cb: CallbackQuery):
             flag = "✅ в составе"
         when = " ".join(filter(None, [r.get("date"), r.get("time")])).strip()
         title = esc(r["title"]) + (f" — {esc(when)}" if when else "")
-        lines.append(f"{flag} · <b>{title}</b>")
-    await _safe_edit(cb.message, "\n".join(lines), my_registrations(regs))
+        line = f"{flag} · <b>{title}</b>"
+        pay = r.get("my_pay_status")
+        if pay and r["reg_status"] == "active" and not r["is_waitlist"]:
+            line += f"\n   {_PAY_ICON.get(pay, pay)}"
+        lines.append(line)
+    return "\n".join(lines)
+
+
+@router.callback_query(F.data == "my_regs")
+async def cb_my_regs(cb: CallbackQuery):
+    regs = await db.get_user_live_registrations(cb.from_user.id)
+    if not regs:
+        await _safe_edit(cb.message, _texts()["my_regs_empty"], back_to_menu())
+        await cb.answer()
+        return
+    await _safe_edit(cb.message, _my_regs_text(regs), my_registrations(regs))
     await cb.answer()
 
 
