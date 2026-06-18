@@ -13,6 +13,12 @@ class AddPair(StatesGroup):
     partner = State()
 
 
+class Reschedule(StatesGroup):
+    """Админ переносит дату/время уже опубликованного турнира."""
+    date = State()
+    time = State()
+
+
 class NewTournament(StatesGroup):
     """Визард создания турнира (Этап 4)."""
     title = State()

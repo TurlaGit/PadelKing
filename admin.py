@@ -21,7 +21,7 @@ import db
 from announcement import refresh_announcement
 from config import ADMIN_IDS
 from formatting import esc
-from states import AddPair
+from states import AddPair, Reschedule
 
 log = logging.getLogger(__name__)
 router = Router()
@@ -74,12 +74,51 @@ async def _roster(tid: str):
             text=f"💳 {i}. {reg.get('player_name')} + {reg.get('partner_name')}"[:60],
             callback_data=f"apm:{reg['id']}",
         )])
+    kb.append([InlineKeyboardButton(text="📋 Кто не оплатил", callback_data=f"apunpaid:{tid}")])
     kb.append([InlineKeyboardButton(text="🗂 Снятые пары", callback_data=f"apcanc:{tid}")])
     t = await db.get_tournament(tid)
     toggle = "🔓 Открыть запись" if t and t.get("is_closed") else "🔒 Закрыть запись"
     kb.append([InlineKeyboardButton(text=toggle, callback_data=f"aclose:{tid}")])
     kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"apay:{tid}")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+@router.callback_query(F.data.startswith("apunpaid:"))
+async def show_unpaid(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    tid = cb.data.split(":", 1)[1]
+    t = await db.get_tournament(tid)
+    if not t:
+        await cb.answer("Не найдено.", show_alert=True)
+        return
+    main = await db.get_main_registrations(tid)
+    rows = []
+    for reg in main:
+        if reg["status"] == "looking":
+            continue
+        pays = await db.get_pair_payments(reg["id"])
+        for p in pays:
+            if p["status"] in ("paid", "paid_manual"):
+                continue
+            name = (reg["player_name"] if p["who"] == "player"
+                    else reg["partner_name"]) or "—"
+            uname = (reg["player_username"] if p["who"] == "player"
+                     else reg["partner_username"])
+            mark = {"unpaid": "⏳", "pending_review": "🧾", "rejected": "❌"}.get(p["status"], "•")
+            line = f"{mark} {esc(name)}" + (f" @{esc(uname)}" if uname else "")
+            if reg["is_waitlist"]:
+                line += " <i>(лист ожидания)</i>"
+            rows.append(line)
+    text = f"📋 <b>Не оплатили — {esc(t['title'])}</b>\n\n" + (
+        "\n".join(rows) if rows else "<i>Все оплатили 🎉</i>"
+    )
+    back = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"apay:{tid}")]
+    ])
+    await _safe_edit(cb.message, text, back)
+    await cb.answer()
 
 
 async def _safe_edit(message: Message, text: str, kb) -> None:
@@ -100,6 +139,7 @@ async def cmd_admin(message: Message):
         [InlineKeyboardButton(text="💳 Оплаты", callback_data="adm:payments")],
         [InlineKeyboardButton(text="➕ Добавить пару вручную", callback_data="adm:addpair")],
         [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm:analytics")],
+        [InlineKeyboardButton(text="🗓 Перенести турнир", callback_data="adm:reschedule")],
         [InlineKeyboardButton(text="🗑 Отменить турнир", callback_data="adm:canceltour")],
     ])
     await message.answer("⚙️ <b>Админка PadelKing</b>", reply_markup=kb)
@@ -111,6 +151,7 @@ def _admin_menu_kb() -> InlineKeyboardMarkup:
         [InlineKeyboardButton(text="💳 Оплаты", callback_data="adm:payments")],
         [InlineKeyboardButton(text="➕ Добавить пару вручную", callback_data="adm:addpair")],
         [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm:analytics")],
+        [InlineKeyboardButton(text="🗓 Перенести турнир", callback_data="adm:reschedule")],
         [InlineKeyboardButton(text="🗑 Отменить турнир", callback_data="adm:canceltour")],
     ])
 
@@ -481,6 +522,90 @@ async def restore_pair(cb: CallbackQuery, bot: Bot):
     text, kb = await _roster(res["tid"])
     await _safe_edit(cb.message, text, kb)
     await cb.answer("Пара возвращена")
+
+
+# ---------- перенос турнира ----------
+
+@router.callback_query(F.data == "adm:reschedule")
+async def resched_list(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    ts = await db.list_active_tournaments()
+    if not ts:
+        await cb.message.answer("Активных турниров нет.")
+        await cb.answer()
+        return
+    await state.clear()
+    await cb.message.answer("🗓 Перенести турнир — выбери:",
+                            reply_markup=_tournaments_kb(ts, "ares2"))
+    await cb.answer()
+
+
+@router.callback_query(F.data.startswith("ares2:"))
+async def resched_start(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    tid = cb.data.split(":", 1)[1]
+    t = await db.get_tournament(tid)
+    if not t:
+        await cb.answer("Не найдено.", show_alert=True)
+        return
+    await state.clear()
+    await state.update_data(rs_tid=tid, rs_title=t["title"])
+    await state.set_state(Reschedule.date)
+    await cb.message.answer(
+        f"<b>{esc(t['title'])}</b>\nТекущие дата/время: "
+        f"{esc(t.get('date') or '?')} {esc(t.get('time_start') or '')}\n\n"
+        f"Новая дата (ДД.ММ или ДД.ММ.ГГГГ):"
+    )
+    await cb.answer()
+
+
+@router.message(Reschedule.date, F.text)
+async def resched_date(message: Message, state: FSMContext):
+    from timeutils import parse_date
+    d = parse_date(message.text)
+    if not d:
+        await message.answer("Не понял дату. Формат ДД.ММ или ДД.ММ.ГГГГ:")
+        return
+    await state.update_data(rs_date_iso=d.isoformat(), rs_date_display=d.strftime("%d.%m"))
+    await state.set_state(Reschedule.time)
+    await message.answer("Новое время (например <code>19:00-21:00</code>):")
+
+
+@router.message(Reschedule.time, F.text)
+async def resched_time(message: Message, state: FSMContext, bot: Bot):
+    from datetime import date as _date
+    from timeutils import make_start_at, parse_time_range, payment_deadline, to_iso
+    ts, te = parse_time_range(message.text)
+    if not ts:
+        await message.answer("Не понял время. Например <code>19:00-21:00</code>:")
+        return
+    data = await state.get_data()
+    tid = data.get("rs_tid")
+    d = _date.fromisoformat(data["rs_date_iso"])
+    start_at = make_start_at(d, ts)
+    deadline = payment_deadline(start_at)
+    members = await db.reschedule_tournament(
+        tid, data["rs_date_iso"], data["rs_date_display"],
+        ts, te, to_iso(start_at), to_iso(deadline),
+    )
+    await state.clear()
+    await refresh_announcement(bot, tid)
+    title = esc(data["rs_title"])
+    note = (f"🗓 Турнир «{title}» перенесён.\n"
+            f"Новая дата: <b>{esc(data['rs_date_display'])} {esc(ts)}"
+            + (f"–{esc(te)}" if te else "") + "</b>")
+    for uid in members:
+        try:
+            await bot.send_message(uid, note)
+        except Exception:
+            pass
+    await message.answer(
+        f"✅ Перенесли. Уведомил участников: {len(members)}."
+    )
 
 
 # ---------- отмена турнира админом ----------

@@ -563,11 +563,34 @@ async def pub_menu(cb: CallbackQuery, state: FSMContext):
 
 
 @router.callback_query(F.data == "tw:pubnow")
+async def pub_now_confirm(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    data = await state.get_data()
+    if not data.get("title"):
+        await cb.answer("Сессия истекла, начни заново.", show_alert=True)
+        return
+    rows = [
+        [_btn("✅ Да, опубликовать", "tw:pubnow2")],
+        [_btn("⬅️ Назад к превью", "twedit:back")],
+    ]
+    await cb.message.answer(
+        f"Опубликовать анонс «<b>{data.get('title')}</b>» в группе клуба прямо сейчас?",
+        reply_markup=_kb(rows),
+    )
+    await cb.answer()
+
+
+@router.callback_query(F.data == "tw:pubnow2")
 async def pub_now(cb: CallbackQuery, state: FSMContext, bot: Bot):
     if not _is_admin(cb.from_user.id):
         await cb.answer("Только для администратора.", show_alert=True)
         return
     data = await state.get_data()
+    if not data.get("title"):
+        await cb.answer("Сессия истекла, начни заново.", show_alert=True)
+        return
     tid = await _insert_from_data(data, None, "published")
     await state.clear()
     if GROUP_CHAT_ID:

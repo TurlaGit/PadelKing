@@ -1301,6 +1301,56 @@ async def deactivate_missing(known_ids: list[str]) -> None:
         await conn.commit()
 
 
+async def reschedule_tournament(
+    tid: str, date_iso: str, date_display: str,
+    time_start: str, time_end: str | None,
+    start_at_iso: str, payment_deadline_iso: str,
+) -> list[int]:
+    """Переносит турнир на новые дату/время. Сбрасывает флаги напоминаний
+    (день-до и WL-разгрузка пересчитаются). Возвращает user_id всех живых
+    участников для уведомления о переносе."""
+    placeholders = ",".join("?" * len(ACTIVE_REG_STATUSES))
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            f"""
+            SELECT player_user_id, partner_user_id FROM registrations
+            WHERE tournament_id=? AND status IN ({placeholders})
+            """,
+            (tid, *ACTIVE_REG_STATUSES),
+        )
+        members: set[int] = set()
+        for row in await cur.fetchall():
+            for m in (row["player_user_id"], row["partner_user_id"]):
+                if m:
+                    members.add(m)
+        await conn.execute(
+            "UPDATE tournaments SET date=?, time_start=?, time_end=?, "
+            "start_at=?, payment_deadline=?, "
+            "unpaid_notified=0, waitlist_closed_notified=0 WHERE id=?",
+            (date_display, time_start, time_end, start_at_iso,
+             payment_deadline_iso, tid),
+        )
+        # Сбрасываем флаги day-reminder у всех живых записей этого турнира
+        await conn.execute(
+            f"UPDATE registrations SET day_reminder_sent=0 "
+            f"WHERE tournament_id=? AND status IN ({placeholders})",
+            (tid, *ACTIVE_REG_STATUSES),
+        )
+        # Сбрасываем reminder_stage у платежей (пусть цепочка пройдёт заново)
+        await conn.execute(
+            """
+            UPDATE payments SET reminder_stage=0, last_reminder_at=NULL
+            WHERE registration_id IN (
+                SELECT id FROM registrations WHERE tournament_id=? AND status='active'
+            ) AND status IN ('unpaid','rejected')
+            """,
+            (tid,),
+        )
+        await conn.commit()
+        return list(members)
+
+
 async def set_registration_closed(tid: str, closed: bool) -> None:
     async with aiosqlite.connect(DB_PATH) as conn:
         await conn.execute(

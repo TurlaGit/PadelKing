@@ -43,7 +43,7 @@ async def send_with_retry(coro_factory: Callable[[], Awaitable], *, name: str = 
             await asyncio.sleep(min(float(e.retry_after) + 0.5, 30.0))
             last_exc = e
             continue
-        except TelegramForbiddenError as e:
+        except TelegramForbiddenError:
             log.info("%s: пользователь заблокировал бота, ретраи не нужны", name)
             return None
         except TelegramBadRequest as e:
