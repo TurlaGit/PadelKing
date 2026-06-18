@@ -15,6 +15,7 @@ from announcement import refresh_announcement
 from config import ADMIN_IDS
 from formatting import esc
 from keyboards import pair_declined_options
+from safety import send_with_retry
 from timeutils import from_iso, now_wita, to_iso
 
 log = logging.getLogger(__name__)
@@ -26,10 +27,13 @@ SCREENSHOT_TTL_DAYS = 14      # сколько храним скрины пос�
 
 
 async def _dm(bot: Bot, uid: int, text: str, **kw) -> None:
-    try:
-        await bot.send_message(uid, text, **kw)
-    except Exception as e:
-        log.info("DM %s не доставлен: %s", uid, e)
+    """Уведомление с ретраями: важные сообщения (напоминания об оплате,
+    жёсткие дедлайны, авто-снятие, поднятие из листа ожидания) не должны
+    теряться из-за временного сбоя сети Telegram."""
+    await send_with_retry(
+        lambda: bot.send_message(uid, text, **kw),
+        name=f"dm[{uid}]",
+    )
 
 
 def _fmt(dt) -> str:

@@ -13,6 +13,7 @@ import matchmaking
 import partners
 import payments
 import registration
+import safety
 import scheduler
 import wizard
 from content import load_content
@@ -69,6 +70,8 @@ async def main() -> None:
     # known_users-кеш на уровне диспетчера → покрывает все роутеры
     dp.message.middleware(handlers.KnownUsersMiddleware())
     dp.callback_query.middleware(handlers.KnownUsersMiddleware())
+    # анти-флуд по callback (2 сек по одной кнопке от одного user_id)
+    dp.callback_query.middleware(safety.AntiFloodMiddleware())
     dp.include_router(admin.router)
     dp.include_router(wizard.router)
     dp.include_router(partners.router)

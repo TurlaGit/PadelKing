@@ -11,10 +11,11 @@ from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import LinkPreviewOptions
 
 import db
-from config import GROUP_CHAT_ID
+from config import ADMIN_IDS, GROUP_CHAT_ID
 from content import load_content
 from formatting import render_tournament
 from keyboards import announce_keyboard
+from safety import announce_failure, announce_success
 
 log = logging.getLogger(__name__)
 
@@ -50,9 +51,11 @@ async def refresh_announcement(bot: Bot, tid: str) -> None:
                 text=text, chat_id=chat_id, message_id=existing_msg,
                 reply_markup=markup, link_preview_options=preview,
             )
+            await announce_success(chat_id)
             return
         except TelegramBadRequest as e:
             if "message is not modified" in str(e).lower():
+                await announce_success(chat_id)
                 return
             log.info("Анонс не отредактирован, пересоздаю: %s", e)
         except Exception as e:
@@ -64,5 +67,6 @@ async def refresh_announcement(bot: Bot, tid: str) -> None:
             link_preview_options=preview,
         )
         await db.set_announce_message(tid, chat_id, msg.message_id)
+        await announce_success(chat_id)
     except Exception as e:
-        log.warning("Не удалось отправить анонс в группу %s: %s", chat_id, e)
+        await announce_failure(bot, chat_id, e, ADMIN_IDS)
