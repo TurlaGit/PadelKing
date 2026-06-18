@@ -19,6 +19,14 @@ class Reschedule(StatesGroup):
     time = State()
 
 
+class LocationEdit(StatesGroup):
+    """Админ редактирует/создаёт локацию из справочника."""
+    title = State()
+    url = State()
+    new_title = State()
+    new_url = State()
+
+
 class NewTournament(StatesGroup):
     """Визард создания турнира (Этап 4)."""
     title = State()

@@ -1,14 +1,18 @@
-"""Этап 2.4 — мини-админка оплат (для ADMIN_IDS).
+"""Админ-панель PadelKing — всё через inline-кнопки.
 
-/payments — статусы оплат по турниру + ручное подтверждение по игроку.
-/addpair  — добавить готовую пару вручную (нал/форс-мажор), без напоминаний.
+Главное меню (/admin):
+  ➕ Создать турнир
+  📋 Список турниров → ветка по каждому турниру (состав, оплаты, итоги,
+     добавить пару, закрыть/открыть, перенести, отменить)
+  📊 Аналитика → топ-10, выручка за период, число турниров, уник. игроков
+  🏟 Локации (справочник)
+  👤 Режим игрока (UI-переключение)
 
-Полный визард создания турнира и аналитика — Этап 4.
+Доступ только для ADMIN_IDS. Фильтр на роутере + проверка в каждом хэндлере.
 """
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.types import (
     CallbackQuery,
@@ -20,11 +24,15 @@ from aiogram.types import (
 import db
 from announcement import refresh_announcement
 from config import ADMIN_IDS
-from formatting import esc
-from states import AddPair, Reschedule
+from formatting import esc, level_emoji
+from states import AddPair, LocationEdit, Reschedule
+from timeutils import now_wita, to_iso
 
 log = logging.getLogger(__name__)
 router = Router()
+# defense-in-depth: весь админ-роутер только для ADMIN_IDS
+router.message.filter(F.from_user.id.in_(ADMIN_IDS))
+router.callback_query.filter(F.from_user.id.in_(ADMIN_IDS))
 
 _ICON = {"paid": "✅", "paid_manual": "✅", "pending_review": "🧾",
          "rejected": "❌", "unpaid": "⏳"}
@@ -74,12 +82,8 @@ async def _roster(tid: str):
             text=f"💳 {i}. {reg.get('player_name')} + {reg.get('partner_name')}"[:60],
             callback_data=f"apm:{reg['id']}",
         )])
-    kb.append([InlineKeyboardButton(text="📋 Кто не оплатил", callback_data=f"apunpaid:{tid}")])
-    kb.append([InlineKeyboardButton(text="🗂 Снятые пары", callback_data=f"apcanc:{tid}")])
-    t = await db.get_tournament(tid)
-    toggle = "🔓 Открыть запись" if t and t.get("is_closed") else "🔒 Закрыть запись"
-    kb.append([InlineKeyboardButton(text=toggle, callback_data=f"aclose:{tid}")])
     kb.append([InlineKeyboardButton(text="🔄 Обновить", callback_data=f"apay:{tid}")])
+    kb.append([InlineKeyboardButton(text="⬅️ К турниру", callback_data=f"admtour:{tid}")])
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=kb)
 
 
@@ -115,7 +119,7 @@ async def show_unpaid(cb: CallbackQuery):
         "\n".join(rows) if rows else "<i>Все оплатили 🎉</i>"
     )
     back = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⬅️ Назад", callback_data=f"apay:{tid}")]
+        [InlineKeyboardButton(text="⬅️ К турниру", callback_data=f"admtour:{tid}")]
     ])
     await _safe_edit(cb.message, text, back)
     await cb.answer()
@@ -130,38 +134,318 @@ async def _safe_edit(message: Message, text: str, kb) -> None:
 
 # ---------- /admin меню ----------
 
-@router.message(Command("admin"))
-async def cmd_admin(message: Message):
-    if not _is_admin(message.from_user.id):
-        return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Создать турнир", callback_data="tw:start")],
-        [InlineKeyboardButton(text="💳 Оплаты", callback_data="adm:payments")],
-        [InlineKeyboardButton(text="➕ Добавить пару вручную", callback_data="adm:addpair")],
-        [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm:analytics")],
-        [InlineKeyboardButton(text="🗓 Перенести турнир", callback_data="adm:reschedule")],
-        [InlineKeyboardButton(text="🗑 Отменить турнир", callback_data="adm:canceltour")],
-    ])
-    await message.answer("⚙️ <b>Админка PadelKing</b>", reply_markup=kb)
-
-
 def _admin_menu_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Создать турнир", callback_data="tw:start")],
-        [InlineKeyboardButton(text="💳 Оплаты", callback_data="adm:payments")],
-        [InlineKeyboardButton(text="➕ Добавить пару вручную", callback_data="adm:addpair")],
+        [InlineKeyboardButton(text="📋 Список турниров", callback_data="adm:tours")],
         [InlineKeyboardButton(text="📊 Аналитика", callback_data="adm:analytics")],
-        [InlineKeyboardButton(text="🗓 Перенести турнир", callback_data="adm:reschedule")],
-        [InlineKeyboardButton(text="🗑 Отменить турнир", callback_data="adm:canceltour")],
+        [InlineKeyboardButton(text="🏟 Локации", callback_data="adm:locations")],
+        [InlineKeyboardButton(text="👤 Режим игрока", callback_data="adm:playermode")],
     ])
 
 
+def _admin_greeting(user) -> str:
+    name = esc(user.first_name or "администратор")
+    return (f"Привет, <b>{name}</b>! 👋\n"
+            f"Вы вошли как <b>администратор</b>. Что нужно?")
+
+
+from aiogram.filters import Command  # noqa: E402
+
+
+@router.message(Command("admin"))
+async def cmd_admin(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        return
+    await state.clear()
+    await message.answer(_admin_greeting(message.from_user), reply_markup=_admin_menu_kb())
+
+
 @router.callback_query(F.data == "adm:menu")
-async def adm_menu(cb: CallbackQuery):
+async def adm_menu(cb: CallbackQuery, state: FSMContext):
     if not _is_admin(cb.from_user.id):
         await cb.answer("Только для администратора.", show_alert=True)
         return
-    await _safe_edit(cb.message, "⚙️ <b>Админка PadelKing</b>", _admin_menu_kb())
+    await state.clear()
+    await _safe_edit(cb.message, _admin_greeting(cb.from_user), _admin_menu_kb())
+    await cb.answer()
+
+
+# ---------- 📋 Список турниров → ветка по каждому ----------
+
+@router.callback_query(F.data == "adm:tours")
+async def adm_tours(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    ts = await db.list_active_tournaments()
+    rows = []
+    if ts:
+        for t in ts:
+            label = f"{level_emoji(t)} {t['title']}"
+            when = " ".join(filter(None, [t.get("date"), t.get("time_start") or t.get("time")])).strip()
+            if when:
+                label += f" · {when}"
+            if t.get("is_closed"):
+                label += " · 🔒"
+            rows.append([InlineKeyboardButton(text=label[:60], callback_data=f"admtour:{t['id']}")])
+        text = "📋 <b>Список турниров</b>\nКликни на турнир для управления:"
+    else:
+        text = "Активных турниров нет. Создай первый!"
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="adm:menu")])
+    await _safe_edit(cb.message, text, InlineKeyboardMarkup(inline_keyboard=rows))
+    await cb.answer()
+
+
+async def _tournament_card_text(t: dict) -> str:
+    when = " ".join(filter(None, [t.get("date"), t.get("time_start") or t.get("time")])).strip()
+    main = await db.get_main_registrations(t["id"])
+    wl = await db.get_waitlist_registrations(t["id"])
+    fin = await db.tournament_financials(t["id"])
+    closed = "🔒 запись закрыта" if t.get("is_closed") else "🔓 запись открыта"
+    lines = [
+        f"{level_emoji(t)} <b>{esc(t['title'])}</b>",
+        f"📅 {esc(when) if when else '—'}",
+        f"{closed}",
+        "",
+        f"👥 Пар в составе: <b>{len(main)}</b>"
+        + (f" / {t['max_pairs']}" if t.get("max_pairs") else ""),
+        f"📋 Лист ожидания: <b>{len(wl)}</b>",
+        f"💰 Собрано: <b>{fin['paid']}/{fin['total']} игроков</b>",
+    ]
+    return "\n".join(lines)
+
+
+def _tournament_branch_kb(t: dict) -> InlineKeyboardMarkup:
+    tid = t["id"]
+    toggle = "🔓 Открыть запись" if t.get("is_closed") else "🔒 Закрыть запись"
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="👥 Состав", callback_data=f"admroster:{tid}")],
+        [InlineKeyboardButton(text="💳 Оплаты (карточки пар)", callback_data=f"apay:{tid}")],
+        [InlineKeyboardButton(text="📋 Кто не оплатил", callback_data=f"apunpaid:{tid}")],
+        [InlineKeyboardButton(text="💰 Итоги (выручка)", callback_data=f"ares:{tid}")],
+        [InlineKeyboardButton(text="🗂 Снятые пары", callback_data=f"apcanc:{tid}")],
+        [InlineKeyboardButton(text="➕ Добавить пару вручную", callback_data=f"aap:{tid}")],
+        [InlineKeyboardButton(text=toggle, callback_data=f"aclose:{tid}")],
+        [InlineKeyboardButton(text="🗓 Перенести турнир", callback_data=f"ares2:{tid}")],
+        [InlineKeyboardButton(text="🗑 Отменить турнир", callback_data=f"actour:{tid}")],
+        [InlineKeyboardButton(text="⬅️ К списку турниров", callback_data="adm:tours")],
+    ])
+
+
+@router.callback_query(F.data.startswith("admtour:"))
+async def adm_tour_branch(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    tid = cb.data.split(":", 1)[1]
+    t = await db.get_tournament(tid)
+    if not t:
+        await cb.answer("Не найдено.", show_alert=True)
+        return
+    await _safe_edit(cb.message, await _tournament_card_text(t), _tournament_branch_kb(t))
+    await cb.answer()
+
+
+# Компактный «Состав» (без кнопок оплат) — для быстрого просмотра
+@router.callback_query(F.data.startswith("admroster:"))
+async def adm_roster_view(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    tid = cb.data.split(":", 1)[1]
+    t = await db.get_tournament(tid)
+    if not t:
+        await cb.answer("Не найдено.", show_alert=True)
+        return
+    main = await db.get_main_registrations(tid)
+    wl = await db.get_waitlist_registrations(tid)
+    lines = [f"👥 <b>Состав — {esc(t['title'])}</b>", ""]
+    if not main:
+        lines.append("<i>— пока никого нет</i>")
+    for i, reg in enumerate(main, 1):
+        a = esc(reg.get("player_name") or "—")
+        if reg["status"] == "looking":
+            lines.append(f"{i}. {a} + 🔍 ищет партнёра")
+        else:
+            b = esc(reg.get("partner_name") or "—")
+            lines.append(f"{i}. {a} + {b}")
+    if wl:
+        lines.append("")
+        lines.append(f"<b>📋 Лист ожидания ({len(wl)}):</b>")
+        for i, reg in enumerate(wl, 1):
+            a = esc(reg.get("player_name") or "—")
+            b = esc(reg.get("partner_name") or "🔍")
+            lines.append(f"{i}. {a} + {b}")
+    back = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К турниру", callback_data=f"admtour:{tid}")]
+    ])
+    await _safe_edit(cb.message, "\n".join(lines), back)
+    await cb.answer()
+
+
+# ---------- 🏟 Локации ----------
+
+@router.callback_query(F.data == "adm:locations")
+async def adm_locations(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    locs = await db.list_locations()
+    rows = [
+        [InlineKeyboardButton(text=f"🏟 {loc['title'][:55]}", callback_data=f"admloc:{loc['id']}")]
+        for loc in locs
+    ]
+    rows.append([InlineKeyboardButton(text="➕ Добавить локацию", callback_data="admloc:new")])
+    rows.append([InlineKeyboardButton(text="⬅️ В меню", callback_data="adm:menu")])
+    text = "🏟 <b>Локации</b>\n"
+    text += ("Список площадок клуба. Новые локации также можно добавить "
+             "в шаге визарда «Локация».")
+    await _safe_edit(cb.message, text, InlineKeyboardMarkup(inline_keyboard=rows))
+    await cb.answer()
+
+
+@router.callback_query(F.data == "admloc:new")
+async def adm_location_new(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    await state.clear()
+    await state.set_state(LocationEdit.new_title)
+    await cb.message.answer("➕ Название новой локации:")
+    await cb.answer()
+
+
+@router.message(LocationEdit.new_title, F.text)
+async def adm_location_new_title(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        return
+    await state.update_data(_new_title=message.text.strip()[:120])
+    await state.set_state(LocationEdit.new_url)
+    await message.answer("Ссылка на Google Maps (или «-» если нет):")
+
+
+@router.message(LocationEdit.new_url, F.text)
+async def adm_location_new_url(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    title = data.get("_new_title")
+    url = message.text.strip()
+    url = None if url in ("-", "—", "") else url
+    await db.add_location(title, url)
+    await state.clear()
+    await message.answer(f"✅ Локация «{esc(title)}» добавлена.",
+                          reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                              [InlineKeyboardButton(text="⬅️ К локациям", callback_data="adm:locations")]
+                          ]))
+
+
+@router.callback_query(F.data.startswith("admloce:"))
+async def adm_location_edit_start(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    _, field, loc_id_s = cb.data.split(":")
+    loc_id = int(loc_id_s)
+    await state.clear()
+    await state.update_data(_edit_loc_id=loc_id, _edit_field=field)
+    if field == "title":
+        await state.set_state(LocationEdit.title)
+        await cb.message.answer("Новое название локации:")
+    else:
+        await state.set_state(LocationEdit.url)
+        await cb.message.answer("Новая ссылка Google Maps (или «-» убрать):")
+    await cb.answer()
+
+
+@router.message(LocationEdit.title, F.text)
+async def adm_location_edit_title(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    loc_id = data.get("_edit_loc_id")
+    loc = await db.get_location(loc_id)
+    if not loc:
+        await state.clear()
+        await message.answer("Локация не найдена.")
+        return
+    await db.update_location(loc_id, message.text.strip()[:120], loc.get("maps_url"))
+    await state.clear()
+    await message.answer("✅ Название обновлено.",
+                          reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                              [InlineKeyboardButton(text="⬅️ К локации", callback_data=f"admloc:{loc_id}")]
+                          ]))
+
+
+@router.message(LocationEdit.url, F.text)
+async def adm_location_edit_url(message: Message, state: FSMContext):
+    if not _is_admin(message.from_user.id):
+        return
+    data = await state.get_data()
+    loc_id = data.get("_edit_loc_id")
+    loc = await db.get_location(loc_id)
+    if not loc:
+        await state.clear()
+        await message.answer("Локация не найдена.")
+        return
+    url = message.text.strip()
+    url = None if url in ("-", "—", "") else url
+    await db.update_location(loc_id, loc["title"], url)
+    await state.clear()
+    await message.answer("✅ Ссылка обновлена.",
+                          reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                              [InlineKeyboardButton(text="⬅️ К локации", callback_data=f"admloc:{loc_id}")]
+                          ]))
+
+
+@router.callback_query(F.data.startswith("admloc:") & ~F.data.endswith(":new"))
+async def adm_location_view(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    parts = cb.data.split(":")
+    if len(parts) < 2 or not parts[1].isdigit():
+        await cb.answer()
+        return
+    loc_id = int(parts[1])
+    loc = await db.get_location(loc_id)
+    if not loc:
+        await cb.answer("Не найдено.", show_alert=True)
+        return
+    usage = await db.location_usage(loc_id)
+    lines = [
+        f"🏟 <b>{esc(loc['title'])}</b>",
+        f"🔗 {esc(loc.get('maps_url') or '—')}",
+        f"📊 Использована в турнирах: <b>{usage}</b>",
+    ]
+    rows = [
+        [InlineKeyboardButton(text="✏️ Изменить название", callback_data=f"admloce:title:{loc_id}")],
+        [InlineKeyboardButton(text="🔗 Изменить ссылку Maps", callback_data=f"admloce:url:{loc_id}")],
+        [InlineKeyboardButton(text="⬅️ К локациям", callback_data="adm:locations")],
+    ]
+    await _safe_edit(cb.message, "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=rows))
+    await cb.answer()
+
+
+# ---------- 👤 Режим игрока ----------
+
+@router.callback_query(F.data == "adm:playermode")
+async def adm_player_mode(cb: CallbackQuery, state: FSMContext):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    await state.clear()
+    text = ("👤 <b>Режим игрока</b>\n"
+            "Видишь бот глазами обычного участника. Можно записаться, "
+            "посмотреть оплаты, отменить запись.")
+    rows = [
+        [InlineKeyboardButton(text="🏆 Ближайшие турниры", callback_data="list")],
+        [InlineKeyboardButton(text="📋 Мои записи", callback_data="my_regs")],
+        [InlineKeyboardButton(text="❓ Связь с админом", callback_data="contact")],
+        [InlineKeyboardButton(text="🛡 Вернуться в админку", callback_data="adm:menu")],
+    ]
+    await _safe_edit(cb.message, text, InlineKeyboardMarkup(inline_keyboard=rows))
     await cb.answer()
 
 
@@ -178,9 +462,107 @@ async def adm_analytics(cb: CallbackQuery):
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="🏅 Топ-10 участников", callback_data="adm:top")],
-        [InlineKeyboardButton(text="💰 Итоги турнира", callback_data="adm:results")],
+        [InlineKeyboardButton(text="💰 Выручка (турнир/месяц/всё)", callback_data="adm:rev")],
+        [InlineKeyboardButton(text="📈 Турниров за месяц", callback_data="adm:tcount")],
+        [InlineKeyboardButton(text="👥 Уникальных игроков", callback_data="adm:uplayers")],
+        [InlineKeyboardButton(text="⬅️ В меню", callback_data="adm:menu")],
     ])
-    await cb.message.answer("📊 Аналитика:", reply_markup=kb)
+    await _safe_edit(cb.message, "📊 <b>Аналитика</b>", kb)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:rev")
+async def adm_revenue_menu(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏆 По конкретному турниру", callback_data="adm:results")],
+        [InlineKeyboardButton(text="📅 За этот месяц", callback_data="adm:revmonth")],
+        [InlineKeyboardButton(text="📅 За всё время", callback_data="adm:revall")],
+        [InlineKeyboardButton(text="⬅️ К аналитике", callback_data="adm:analytics")],
+    ])
+    await _safe_edit(cb.message, "💰 <b>Выручка</b> — выбери разрез:", kb)
+    await cb.answer()
+
+
+def _month_range(now) -> tuple[str, str, str]:
+    """Возвращает (start_iso, end_iso, human-label) для текущего месяца."""
+    start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    if start.month == 12:
+        end = start.replace(year=start.year + 1, month=1)
+    else:
+        end = start.replace(month=start.month + 1)
+    return to_iso(start), to_iso(end), start.strftime("%m.%Y")
+
+
+def _format_revenue(rows: list[dict]) -> str:
+    if not rows:
+        return "<i>— оплат не было</i>"
+    parts = []
+    for r in rows:
+        amount = r["amount"] or 0
+        if float(amount).is_integer():
+            amount = f"{int(amount):,}".replace(",", ".")
+        parts.append(f"• <b>{amount} {esc(r['cur'] or '')}</b> ({r['payers']} оплат)")
+    return "\n".join(parts)
+
+
+@router.callback_query(F.data == "adm:revmonth")
+async def adm_revenue_month(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    start, end, label = _month_range(now_wita())
+    rows = await db.revenue_by_currency(start, end)
+    text = f"📅 <b>Выручка за {label}</b>\n\n" + _format_revenue(rows)
+    back = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:rev")]
+    ])
+    await _safe_edit(cb.message, text, back)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:revall")
+async def adm_revenue_all(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    rows = await db.revenue_by_currency()
+    text = "📅 <b>Выручка за всё время</b>\n\n" + _format_revenue(rows)
+    back = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ Назад", callback_data="adm:rev")]
+    ])
+    await _safe_edit(cb.message, text, back)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:tcount")
+async def adm_tournaments_count(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    start, end, label = _month_range(now_wita())
+    n = await db.tournaments_in_period(start, end)
+    text = f"📈 <b>Турниров за {label}:</b> {n}"
+    back = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К аналитике", callback_data="adm:analytics")]
+    ])
+    await _safe_edit(cb.message, text, back)
+    await cb.answer()
+
+
+@router.callback_query(F.data == "adm:uplayers")
+async def adm_unique_players(cb: CallbackQuery):
+    if not _is_admin(cb.from_user.id):
+        await cb.answer("Только для администратора.", show_alert=True)
+        return
+    n = await db.unique_players_total()
+    text = f"👥 <b>Уникальных игроков за всё время:</b> {n}"
+    back = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⬅️ К аналитике", callback_data="adm:analytics")]
+    ])
+    await _safe_edit(cb.message, text, back)
     await cb.answer()
 
 
@@ -238,33 +620,10 @@ async def adm_results_show(cb: CallbackQuery):
     await cb.answer()
 
 
-@router.callback_query(F.data == "adm:payments")
-async def adm_payments(cb: CallbackQuery):
-    if not _is_admin(cb.from_user.id):
-        await cb.answer("Только для администратора.", show_alert=True)
-        return
-    ts = await db.list_active_tournaments()
-    if not ts:
-        await cb.message.answer("Активных турниров нет.")
-        await cb.answer()
-        return
-    await cb.message.answer("💳 Оплаты — выбери турнир:", reply_markup=_tournaments_kb(ts, "apay"))
-    await cb.answer()
-
-
-@router.callback_query(F.data == "adm:addpair")
-async def adm_addpair(cb: CallbackQuery, state: FSMContext):
-    if not _is_admin(cb.from_user.id):
-        await cb.answer("Только для администратора.", show_alert=True)
-        return
-    ts = await db.list_active_tournaments()
-    if not ts:
-        await cb.message.answer("Активных турниров нет.")
-        await cb.answer()
-        return
-    await state.clear()
-    await cb.message.answer("➕ Добавить пару — выбери турнир:", reply_markup=_tournaments_kb(ts, "aap"))
-    await cb.answer()
+# Заметка: точки входа adm:payments / adm:addpair / adm:reschedule /
+# adm:canceltour убраны — теперь все действия над турниром доступны
+# через ветку «📋 Список турниров → выбрать турнир». Прямые callback'и
+# (apay:/aap:/ares2:/actour:) сохранены, вызываются из ветки.
 
 
 # ---------- /payments ----------
@@ -524,23 +883,7 @@ async def restore_pair(cb: CallbackQuery, bot: Bot):
     await cb.answer("Пара возвращена")
 
 
-# ---------- перенос турнира ----------
-
-@router.callback_query(F.data == "adm:reschedule")
-async def resched_list(cb: CallbackQuery, state: FSMContext):
-    if not _is_admin(cb.from_user.id):
-        await cb.answer("Только для администратора.", show_alert=True)
-        return
-    ts = await db.list_active_tournaments()
-    if not ts:
-        await cb.message.answer("Активных турниров нет.")
-        await cb.answer()
-        return
-    await state.clear()
-    await cb.message.answer("🗓 Перенести турнир — выбери:",
-                            reply_markup=_tournaments_kb(ts, "ares2"))
-    await cb.answer()
-
+# ---------- перенос турнира (вход — кнопка в ветке турнира) ----------
 
 @router.callback_query(F.data.startswith("ares2:"))
 async def resched_start(cb: CallbackQuery, state: FSMContext):
@@ -608,21 +951,7 @@ async def resched_time(message: Message, state: FSMContext, bot: Bot):
     )
 
 
-# ---------- отмена турнира админом ----------
-
-@router.callback_query(F.data == "adm:canceltour")
-async def cancel_tour_list(cb: CallbackQuery):
-    if not _is_admin(cb.from_user.id):
-        await cb.answer("Только для администратора.", show_alert=True)
-        return
-    ts = await db.list_active_tournaments()
-    if not ts:
-        await cb.message.answer("Активных турниров нет.")
-        await cb.answer()
-        return
-    await cb.message.answer("🗑 Отменить турнир — выбери:", reply_markup=_tournaments_kb(ts, "actour"))
-    await cb.answer()
-
+# ---------- отмена турнира (вход — кнопка в ветке турнира) ----------
 
 @router.callback_query(F.data.startswith("actour:"))
 async def cancel_tour_confirm(cb: CallbackQuery):
@@ -636,7 +965,7 @@ async def cancel_tour_confirm(cb: CallbackQuery):
         return
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="✅ Да, отменить турнир", callback_data=f"actour2:{tid}")],
-        [InlineKeyboardButton(text="⬅️ Нет", callback_data="adm:menu")],
+        [InlineKeyboardButton(text="⬅️ Нет", callback_data=f"admtour:{tid}")],
     ])
     await _safe_edit(
         cb.message,

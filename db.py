@@ -342,6 +342,24 @@ async def get_location(loc_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+async def update_location(loc_id: int, title: str, maps_url: str | None) -> None:
+    async with aiosqlite.connect(DB_PATH) as conn:
+        await conn.execute(
+            "UPDATE locations SET title=?, maps_url=? WHERE id=?",
+            (title.strip(), (maps_url or "").strip() or None, loc_id),
+        )
+        await conn.commit()
+
+
+async def location_usage(loc_id: int) -> int:
+    """Сколько турниров используют локацию."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "SELECT COUNT(*) FROM tournaments WHERE location_id=?", (loc_id,)
+        )
+        return (await cur.fetchone())[0]
+
+
 async def list_levels() -> list[str]:
     async with aiosqlite.connect(DB_PATH) as conn:
         cur = await conn.execute(
@@ -1458,6 +1476,65 @@ async def top_participants(limit: int = 10) -> list[dict]:
             (limit,),
         )
         return [dict(r) for r in await cur.fetchall()]
+
+
+async def revenue_by_currency(start_iso: str | None = None,
+                              end_iso: str | None = None) -> list[dict]:
+    """Сумма оплат по валютам за период [start, end). Если границы None — за всё время.
+    Период применяется по t.start_at (когда турнир проводился)."""
+    where = "p.status IN ('paid','paid_manual') AND t.price_amount IS NOT NULL"
+    params: list = []
+    if start_iso:
+        where += " AND t.start_at >= ?"
+        params.append(start_iso)
+    if end_iso:
+        where += " AND t.start_at < ?"
+        params.append(end_iso)
+    async with aiosqlite.connect(DB_PATH) as conn:
+        conn.row_factory = aiosqlite.Row
+        cur = await conn.execute(
+            f"""
+            SELECT t.currency AS cur, SUM(t.price_amount) AS amount,
+                   COUNT(*) AS payers
+            FROM payments p
+            JOIN registrations r ON r.id = p.registration_id
+            JOIN tournaments t ON t.id = r.tournament_id
+            WHERE {where}
+            GROUP BY t.currency
+            ORDER BY amount DESC
+            """,
+            params,
+        )
+        return [dict(r) for r in await cur.fetchall()]
+
+
+async def tournaments_in_period(start_iso: str, end_iso: str) -> int:
+    """Сколько турниров проведено в [start, end)."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            "SELECT COUNT(*) FROM tournaments "
+            "WHERE start_at IS NOT NULL AND start_at >= ? AND start_at < ? "
+            "AND status_v2 IN ('published','finished')",
+            (start_iso, end_iso),
+        )
+        return (await cur.fetchone())[0]
+
+
+async def unique_players_total() -> int:
+    """Сколько уникальных людей хоть раз играли (active-статус)."""
+    async with aiosqlite.connect(DB_PATH) as conn:
+        cur = await conn.execute(
+            """
+            SELECT COUNT(*) FROM (
+                SELECT player_user_id AS uid FROM registrations
+                WHERE status='active' AND player_user_id IS NOT NULL
+                UNION
+                SELECT partner_user_id FROM registrations
+                WHERE status='active' AND partner_user_id IS NOT NULL
+            )
+            """
+        )
+        return (await cur.fetchone())[0]
 
 
 async def tournament_financials(tid: str) -> dict:
